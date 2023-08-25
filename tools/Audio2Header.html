@@ -1,28 +1,38 @@
 <head>
 <script>
+
+// note: the surprising behaviour of the AudioContext.
+// The reported sample rate is not the one from the file.
+// See: https://stackoverflow.com/questions/34201957/why-are-decodeaudiodata-results-different-on-different-os
 window.AudioContext = window.AudioContext || window.webkitAudioContext;
 var context = new AudioContext();
 
 function audioBufferToText(audioBuffer, normalize, resample, removeNoiseFloor, sampleRate, fileType)
 {
-	var buffer = audioBuffer.getChannelData(0);
-		
-	if(audioBuffer.numberOfChannels > 1)
+  // float 32 array (-1..1)
+	let buffer = audioBuffer.getChannelData(0);
+
+  // -- convert to mono if not already
+	if (audioBuffer.numberOfChannels > 1)
 	{
-		for(var c = 1; c < audioBuffer.numberOfChannels; c++)
+		for(let c = 1; c < audioBuffer.numberOfChannels; c++)
 		{
-			var cb = audioBuffer.getChannelData(c);
-			for(var i = 0; i < length; i++)
+			const cb = audioBuffer.getChannelData(c);
+			for(let i = 0; i < cp.length; i++)
 				buffer[i] += cb[i];
 		}
 	}
 	
-	if(resample)
+  // -- resample
+  // seems like audioBuffer.sampleRate is the playback sample
+  // rate which is OS specific.
+  const origSampleRate = audioBuffer.length / audioBuffer.duration;
+	if (resample)
 	{
-		var scale = audioBuffer.sampleRate / sampleRate;
-		var length = Math.floor((buffer.length - 1) / scale); 
-		var b = new Float32Array(length);
-		for(var i = 0; i < length; i++)
+		const scale = audioBuffer.sampleRate / sampleRate;
+		const length = Math.floor((buffer.length - 1) / scale); 
+		const b = new Float32Array(length);
+		for(let i = 0; i < length; i++)
 		{
 			p = Math.floor(i * scale);
 			b[i] = buffer[p];
@@ -32,16 +42,37 @@ function audioBufferToText(audioBuffer, normalize, resample, removeNoiseFloor, s
 	else
 		sampleRate = audioBuffer.sampleRate;
 
-	var snippet = document.getElementById("fileTypeSelect").value;
-	var text = "const unsigned int " + snippet + "ampleRate = " + sampleRate + ";\r\n";
+  // -- normalize
+	if (normalize)
+  {
+    let max = 0.0;
+    if (normalize)
+    {
+      for(let i = 0; i < buffer.length; i++)
+        max = Math.max(Math.abs(buffer[i]), max);
+    }
+    if (max == 0)
+    {
+      max = 1.0;
+    }
+
+    for(let i = 0; i < buffer.length; i++)
+    {
+      buffer[i] = buffer[i] / max;
+    }
+  }
+
+
+	const snippet = document.getElementById("fileTypeSelect").value;
+	let text = "const unsigned int " + snippet + "ampleRate = " + sampleRate + ";\r\n";
 	text += "const unsigned int " + snippet + "ampleCount = " + buffer.length + ";\r\n";
-	if(snippet == "hornS") // Optional variables for horn
+	if (snippet == "hornS") // Optional variables for horn
 	{
 		text += "#define HORN_LOOP\r\n";
 		text += "const unsigned int hornLoopBegin = 0; // Adjust start of loop manually\r\n";
 		text += "const unsigned int hornLoopEnd = " + buffer.length + "; // Adjust end of loop manually\r\n";
 	}
-	if(snippet == "sirenS") // Optional variables for siren
+	if (snippet == "sirenS") // Optional variables for siren
 	{
 		text += "#define SIREN_LOOP\r\n";
 		text += "const unsigned int sirenLoopBegin = 0; // Adjust start of loop manually\r\n";
@@ -49,24 +80,18 @@ function audioBufferToText(audioBuffer, normalize, resample, removeNoiseFloor, s
 	}
 	text += "const signed char " + snippet + "amples[] = {"
 
-	var max = 0;
-	if(normalize)
-	{
-		for(var i = 0; i < buffer.length; i++)
-			max = Math.max(Math.abs(buffer[i]), max);
-	}
-	if(max == 0) max = 1;
-
 	// Array output
-	var out = 0;
-	for(var i = 0; i < buffer.length; i++)
+	let out = 0;
+	for (let i = 0; i < buffer.length; i++)
 	{
-		out = Math.round(buffer[i] / max * 127);
-		if(removeNoiseFloor) //removeNoiseFloor
+		out = Math.round(buffer[i] * 127);
+		if (removeNoiseFloor) //removeNoiseFloor
 		{
-			if (out < 2 && out > -2) out = 0;
+			if (out < 2 && out > -2)
+        out = 0;
 		}
-		if((i & 15) == 0) text += "//" + i + "\r\n"; // new line with sample number
+		if ((i & 15) == 0)
+      text += "//" + i + "\r\n"; // new line with sample number
 		text += out + ", ";
 	}	
 	text += "};\r\n";
@@ -76,12 +101,12 @@ function audioBufferToText(audioBuffer, normalize, resample, removeNoiseFloor, s
 
 function convert(event)
 {
-	var audioBuffer = null;
-	var reader = new FileReader();
-	var file = event.target.files[0];
+	let audioBuffer = null;
+	let reader = new FileReader();
+	let file = event.target.files[0];
 	reader.onload = function(){
 	    context.decodeAudioData(reader.result, function(buffer) {
-			var link = document.createElement("a");
+			let link = document.createElement("a");
 			link.download = file.name.split('.', 1)[0] + ".h";
 			link.href = URL.createObjectURL(new Blob(
 			[audioBufferToText(buffer, document.getElementById("normalize").checked, document.getElementById("resample").checked, document.getElementById("removeNoiseFloor").checked, document.getElementById("samplerate").value)], {type: "text/plain"}));
@@ -101,25 +126,50 @@ function convert(event)
 
 <style>
 	body {
-	  background-color: rgb(60, 161, 120);
+    font-family: arial;
 	}
-	</style>
+  legend {
+    background-color: #000;
+    color: #fff;
+    padding: 3px 6px;
+  }
+  input {
+    margin: 0.4rem;
+  }
+  fieldset {
+    width: fit-content;
+	  background-color: #eee;
+  }
+</style>
 
 </head>
-<body style="font-family: arial">
-<h1><a href="https://youtube.com/bitlunislab">bitluni</a>'s audio to header converter</h1>
-Modified by <a href="https://www.youtube.com/channel/UCqWO3PNCSjHmYiACDMLr23w">TheDIYGuy999</a> for my <a href="https://github.com/TheDIYGuy999/Rc_Engine_Sound_ESP32">ESP32 RC Engine Sound & Light Controller</a> <br><br>
+<body>
+
+  <fieldset>
+    <legend>
+      <a href="https://youtube.com/bitlunislab">bitluni</a>'s audio to header converter
+    </legend>
+    <small>
+Modified by <a href="https://www.youtube.com/channel/UCqWO3PNCSjHmYiACDMLr23w">TheDIYGuy999</a> for my <a href="https://github.com/TheDIYGuy999/Rc_Engine_Sound_ESP32">ESP32 RC Engine Sound & Light Controller</a>
+    </small>
+    <br />
 
 <h4>1. Select the export file format (it is recommended to leave the settings as they are):</h4>
-<input id="normalize" type="checkbox" unchecked>normalize (Use this, if your wav file does not use the entire dynamic range and is too silent)
-<br>
-<input id="resample" type="checkbox" checked>resample
-<input id="samplerate" value="22050">Hz (22050 Hz is standard)
-<br><br>
+<input id="normalize" type="checkbox" unchecked/>
+<label for="normalize">normalize</label>
+(Use this, if your wav file does not use the entire dynamic range and is too silent)
+<br />
+
+<input id="resample" type="checkbox" checked/>
+<label for="resample">resample</label>
+<input id="samplerate" type="number" min="1" value="22050"/>Hz (22050 Hz is standard)
+<br />
 
 <h4>2. Select noise reduction options:</h4>
-<input id="removeNoiseFloor" type="checkbox" unchecked>remove noise floor (recommended for sounds with silent passages)
-<br><br>
+<input id="removeNoiseFloor" type="checkbox" unchecked/>
+<label for="removeNoiseFloor">remove noise floor<label/>
+(recommended for sounds with silent passages)
+<br />
 
 <h4>3. Select the export file type you want (for idle, rev, horn etc. sound):</h4>
 	<select name="fileTypeSelect" id="fileTypeSelect">
@@ -148,13 +198,17 @@ Modified by <a href="https://www.youtube.com/channel/UCqWO3PNCSjHmYiACDMLr23w">T
 		<option value="tireSquealS">tireSqueal (Reifenquietschen)</option>
         <option value="outOfFuelS">outOfFuel (kein Treibstoff)</option>
 	</select>
-<br><br>
+<label for="fileTypeSelect">Sound type<label/>
+<br />
 
-<h4>4. Open the unsigned 8bit PCM, 22050Hz wav file, which was previously made with Audacity:</h4>
-<input type="file" onchange="convert(event)"><br><br>
+<h4>4. Open the audio file, which was previously made with Audacity:</h4>
+<input type="file" onchange="convert(event)">
+<br />
 
 <h4>5. Your .h file is generated and downloaded.</h4>
-	-> Save it in /vehicles/sounds<br>
+	-> Save it in /vehicles/sounds<br />
 	-> Add link to your vehicle file
 
-</body></html>
+  </fieldset>
+</body>
+</html>
