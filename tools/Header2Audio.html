@@ -38,40 +38,12 @@ function headerToArray(headerText) {
   return [sampleRate, buffer];
 }
 
-/** Adds an unsigned 8 bit value to the given byte buffer
- *  at the given position.
- */
-function addInt8(pos, buffer, value) {
-  buffer[pos] = value & 0xff;
-}
-
-
-/** Adds an unsigned 16 bit value to the given byte buffer
- *  at the given position.
- *
- *  It's little endian.
- */
-function addInt16(pos, buffer, value) {
-  addInt8(pos,     buffer, value);
-  addInt8(pos + 1, buffer, value >> 8);
-}
-
-
-/** Adds an unsigned 32 bit value to the given byte buffer
- *  at the given position.
- *
- *  It's little endian.
- */
-function addInt32(pos, buffer, value) {
-  addInt16(pos,     buffer, value);
-  addInt16(pos + 2, buffer, value >> 16);
-}
-
 
 /** Converts the given text (header/include) file to a wav array.
  *
  *  @param repeats: The number of times the audio sample is
  *     repeated (put one after another).
+ *  @returns An Int8Array with the wav data.
  */
 function toWav(headerText, repeats=1) {
 
@@ -82,61 +54,62 @@ function toWav(headerText, repeats=1) {
   const samplesNo = buffer.length * repeats;
   const fileLength = samplesNo * bytesNo + 44;
   
-  var buf = new Int8Array(fileLength);
+  const buf = new ArrayBuffer(fileLength);
+  const view = new DataView(buf, 0)
 
   // -- RIFF section
-  addInt8(0, buf, "R".charCodeAt(0));
-  addInt8(1, buf, "I".charCodeAt(0));
-  addInt8(2, buf, "F".charCodeAt(0));
-  addInt8(3, buf, "F".charCodeAt(0));
-  addInt32(4, buf, fileLength - 8)
+  view.setUint8(0, "R".charCodeAt(0));
+  view.setUint8(1, "I".charCodeAt(0));
+  view.setUint8(2, "F".charCodeAt(0));
+  view.setUint8(3, "F".charCodeAt(0));
+  view.setUint32(4, fileLength - 8, true)
 
   // -- format section
-  addInt8(8,  buf, "W".charCodeAt(0));
-  addInt8(9,  buf, "A".charCodeAt(0));
-  addInt8(10, buf, "V".charCodeAt(0));
-  addInt8(11, buf, "E".charCodeAt(0));
+  view.setUint8(8, "W".charCodeAt(0));
+  view.setUint8(9, "A".charCodeAt(0));
+  view.setUint8(10, "V".charCodeAt(0));
+  view.setUint8(11, "E".charCodeAt(0));
 
-  addInt8(12, buf, "f".charCodeAt(0));
-  addInt8(13, buf, "m".charCodeAt(0));
-  addInt8(14, buf, "t".charCodeAt(0));
-  addInt8(15, buf, " ".charCodeAt(0));
+  view.setUint8(12, "f".charCodeAt(0));
+  view.setUint8(13, "m".charCodeAt(0));
+  view.setUint8(14, "t".charCodeAt(0));
+  view.setUint8(15, " ".charCodeAt(0));
 
-  addInt32(16, buf, 16); // format section length
-  addInt16(20, buf, 1);  // format type (PCM)
-  addInt16(22, buf, channels); // format type (PCM)
-  addInt32(24, buf, sampleRate);
+  view.setUint32(16, 16, true); // format section length
+  view.setUint16(20, 1, true);  // format type (PCM)
+  view.setUint16(22, channels, true); // format type (PCM)
+  view.setUint32(24, sampleRate, true);
 
   const bitRate = bytesNo * channels * sampleRate;
-  addInt32(28, buf, bitRate);
-  addInt16(32, buf, bytesNo * channels);
-  addInt16(34, buf, bytesNo * 8);
+  view.setUint32(28, bitRate, true);
+  view.setUint16(32, bytesNo * channels, true);
+  view.setUint16(34, bytesNo * 8, true);
   
   // -- data section
-  addInt8(36, buf, "d".charCodeAt(0));
-  addInt8(37, buf, "a".charCodeAt(0));
-  addInt8(38, buf, "t".charCodeAt(0));
-  addInt8(39, buf, "a".charCodeAt(0));
+  view.setUint8(36, "d".charCodeAt(0));
+  view.setUint8(37, "a".charCodeAt(0));
+  view.setUint8(38, "t".charCodeAt(0));
+  view.setUint8(39, "a".charCodeAt(0));
 
   const dataSectionLength = bytesNo * samplesNo;
-  addInt32(40, buf, dataSectionLength); // data section length
+  view.setUint32(40, dataSectionLength, true); // data section length
   let pos = 44;
   for (let j = 0; j < repeats; j++) {
     for (let i = 0; i < buffer.length; i++) {
       if (bytesNo == 1) {
-        addInt8(pos, buf, Math.round(buffer[i] * (1 << 7) + (1 << 7)));
+        view.setUint8(pos, Math.round(buffer[i] * (1 << 7) + (1 << 7)));
         pos++;
       } else if (bytesNo == 2) {
-        addInt16(pos, buf, Math.round(buffer[i] * (1 << 15)));
+        view.setUint16(pos, Math.round(buffer[i] * (1 << 15)), true);
         pos+=2;
       } else if (bytesNo == 4) {
-        addInt32(pos, buf, Math.round(buffer[i] * (1 << 31)));
+        view.setUint32(pos, Math.round(buffer[i] * (1 << 31)), true);
         pos+=4;
       }
     }
   }
 
-  return buf;
+  return new Uint8Array(buf);
 }
 
 
