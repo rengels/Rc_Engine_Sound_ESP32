@@ -339,20 +339,139 @@ volatile boolean couplerSwitchInteruptLatch; // this is enabled, if the coupler 
 uint16_t pulseWidthRaw[PULSE_ARRAY_SIZE];  // Current RC signal RAW pulse width [X] = channel number
 uint16_t pulseWidthRaw2[PULSE_ARRAY_SIZE]; // Current RC signal RAW pulse width with linearity compensation [X] = channel number
 uint16_t pulseWidthRaw3[PULSE_ARRAY_SIZE]; // Current RC signal RAW pulse width before averaging [X] = channel number
-uint16_t pulseWidth[PULSE_ARRAY_SIZE];     // Current RC signal pulse width [X] = channel number
 int16_t pulseOffset[PULSE_ARRAY_SIZE];     // Offset for auto zero adjustment
-
-uint16_t pulseMaxNeutral[PULSE_ARRAY_SIZE]; // PWM input signal configuration storage variables
-uint16_t pulseMinNeutral[PULSE_ARRAY_SIZE];
-uint16_t pulseMax[PULSE_ARRAY_SIZE];
-uint16_t pulseMin[PULSE_ARRAY_SIZE];
-uint16_t pulseMaxLimit[PULSE_ARRAY_SIZE];
-uint16_t pulseMinLimit[PULSE_ARRAY_SIZE];
-
-uint16_t pulseZero[PULSE_ARRAY_SIZE]; // Usually 1500 (The mid point of 1000 - 2000 Microseconds)
-uint16_t pulseLimit = 1100;           // pulseZero +/- this value (1100)
 uint16_t pulseMinValid = 700;         // The minimum valid pulsewidth (was 950)
 uint16_t pulseMaxValid = 2300;        // The maximum valid pulsewidth (was 2050)
+
+uint16_t pulseLimit = 1100;           // pulseZero +/- this value (1100)
+
+/** Class for pulse handling.
+ *
+ *  We are assuming a standard RC input pulse with
+ *  1ms to 2ms (mid at 1.5ms)
+ */
+class Pulse {
+private:
+    boolean  reverse;     /// this pulse is reversed from the raw input
+    boolean  exponential; /// this pulse is exponential from the raw input
+    uint16_t zero;        /// neutral pulse length in ms
+    uint16_t max;         /// maximum pulse length in ms
+    uint16_t min;         /// minimum pulse length in ms
+    uint16_t maxNeutral;  /// maximum pulse length that is considered neutral
+    uint16_t minNeutral;  /// minimum pulse length that is considered neutral
+    uint16_t maxLimit;    /// maximum pulse length that is considered valid
+    uint16_t minLimit;    /// minimum pulse length that is considered valid
+
+    uint16_t value;       /// The actual value of the pulse signal
+
+public:
+    Pulse():
+        reverse(false),
+        exponential(false),
+        zero(1500),
+        max(zero + pulseSpan),
+        min(zero - pulseSpan),
+        maxNeutral(zero + pulseNeutral),
+        minNeutral(zero - pulseNeutral),
+        maxLimit(zero + pulseLimit),
+        minLimit(zero - pulseLimit),
+        value(zero) {
+    }
+
+    /** Set the pulse value.
+     *
+     *  If the value is outside of the limits it will be ignored.
+     *  Clamps it at min/max
+     */
+    void setValue(uint16_t raw) {
+        if ((raw > minLimit) && (raw < maxLimit)) {
+            if (raw > max) {
+                value = max;
+            } else if (raw < min) {
+                value = min;
+            } else {
+                value = raw;
+            }
+        }
+    }
+
+    /** Returns the pulse value.
+     *
+     *  It's guaranteed to be within the min/max limits.
+     */
+    uint16_t getValue() const {
+        return value;
+    }
+
+    /** Get the zero pulse value. The middle point.
+     *
+     */
+    uint16_t getZero() const {
+        return zero;
+    }
+
+    /** Returns an absolute value of the signal in the range 0-500
+     *
+     *  @param reduction: Lower the maximum value (500) by the given one.
+     */
+    uint16_t getAbsolute(uint16_t reduction = 0) const {
+        uint16_t result;
+        if (value > maxNeutral) {
+            result = map(value, maxNeutral, max, 0, 500 - reduction);
+        } else if (value < minNeutral) {
+            result = map(value, minNeutral, min, 0, 500 - reduction);
+        } else {
+            result = 0;
+        }
+        return result;
+    }
+
+    /** Returns true if the pulse is greater than neutral/zero. */
+    boolean isPositive() const {
+        return value > zero;
+    }
+
+    /** Returns true if the pulse is considered "neutral" */
+    boolean isNeutral() const {
+        return (value <= maxNeutral) && (value >= minNeutral);
+    }
+
+    /** Returns true if the pulse is considered "forward" */
+    boolean isForward() const {
+        return value > maxNeutral;
+    }
+
+    /** Returns true if the pulse is considered "backward" */
+    boolean isBackward() const {
+        return value < minNeutral;
+    }
+
+    /** Return -1 for Backwards, 0 for Neutral and 1 for Forward */
+    int8_t direction() const {
+        return isNeutral() ? 0 : (isForward() ? 1 : -1);
+    }
+
+    /** Increases the value by the given amount. */
+    void increase(uint16_t amount) {
+        value += amount;
+        if (value > max) {
+            value = max;
+        }
+    }
+
+    /** Decrease the value by the given amount. */
+    void decrease(uint16_t amount) {
+        value -= amount;
+        if (value < min) {
+            value = min;
+        }
+    }
+
+};
+
+
+Pulse pulse[PULSE_ARRAY_SIZE];
+
 bool autoZeroDone;                    // Auto zero offset calibration done
 #define NONE 16                       // The non existing "Dummy" channel number (usually 16) TODO
 
@@ -461,10 +580,6 @@ volatile boolean escIsDriving = false; // ESC is in a driving state
 volatile boolean escInReverse = false; // ESC is driving or braking backwards
 volatile boolean brakeDetect = false;  // Additional brake detect signal, enabled immediately, if brake applied
 int8_t driveState = 0;                 // for ESC state machine
-uint16_t escPulseMax = 2000;           // ESC calibration variables (values will be changed later)
-uint16_t escPulseMin = 1000;
-uint16_t escPulseMaxNeutral = 1500;
-uint16_t escPulseMinNeutral = 1500;
 uint16_t currentSpeed = 0;         // 0 - 500 (current ESC power)
 volatile bool crawlerMode = false; // Crawler mode intended for crawling competitons (withouth sound and virtual inertia)
 
@@ -1883,27 +1998,8 @@ void setup()
 #endif
   Serial.printf("-------------------------------------\n");
 
-  // Calculate RC input signal ranges for all channels
-  for (uint8_t i = 1; i < PULSE_ARRAY_SIZE; i++)
-  {
-    pulseZero[i] = 1500; // Always 1500. This is the center position. Auto centering is now done in "processRawChannels()"
-
-    // Input signals
-    pulseMaxNeutral[i] = pulseZero[i] + pulseNeutral;
-    pulseMinNeutral[i] = pulseZero[i] - pulseNeutral;
-    pulseMax[i] = pulseZero[i] + pulseSpan;
-    pulseMin[i] = pulseZero[i] - pulseSpan;
-    pulseMaxLimit[i] = pulseZero[i] + pulseLimit;
-    pulseMinLimit[i] = pulseZero[i] - pulseLimit;
-  }
 
   // ESC output range calibration
-  escPulseMaxNeutral = pulseZero[3] + escTakeoffPunch; // Additional takeoff punch around zero
-  escPulseMinNeutral = pulseZero[3] - escTakeoffPunch;
-
-  escPulseMax = pulseZero[3] + escPulseSpan;
-  escPulseMin = pulseZero[3] - escPulseSpan + escReversePlus; // Additional power for ESC with slow reverse
-
   // ESC setup
   setupMcpwmESC(); // ESC now using mpcpwm
 }
@@ -2276,7 +2372,7 @@ void processRawChannels()
 
       // Center channel, if out of range!
       if (pulseWidthRaw3[i] > pulseMaxValid || pulseWidthRaw3[i] < pulseMinValid)
-        pulseWidthRaw3[i] = pulseZero[i];
+        pulseWidthRaw3[i] = 1500;
 
       // Limit channel, if out of range (required for RGT  MT-350 @ max. throttle dual rate)
       if (pulseWidthRaw3[i] > 2000)
@@ -2320,12 +2416,12 @@ void processRawChannels()
       if (initDone)
       {
         smoothed[i] = (smoothed[i] * (n - 1) + pulseWidthRaw3[i]) / n;
-        pulseWidth[i] = smoothed[i];
+        pulse[i].setValue(smoothed[i]);
       }
       else
       {
         smoothed[i] = pulseWidthRaw3[i];
-        pulseWidth[i] = pulseWidthRaw3[i];
+        pulse[i].setValue(pulseWidthRaw3[i]);
         if (i >= PULSE_ARRAY_SIZE - 1)
           initDone = true;
       }
@@ -2334,7 +2430,7 @@ void processRawChannels()
 #else // Without averaging -----
   for (uint8_t i = 1; i < PULSE_ARRAY_SIZE; i++)
   {
-    pulseWidth[i] = pulseWidthRaw3[i];
+    pulse[i].setValue(pulseWidthRaw3[i]);
   }
 #endif
 
@@ -2348,7 +2444,7 @@ void processRawChannels()
     Serial.printf("CHANNEL_DEBUG:\n");
     for (uint8_t channelNum = 1; channelNum < PULSE_ARRAY_SIZE; channelNum++)
     {
-      Serial.printf(" CH%i: %i µs\n", channelNum, pulseWidth[channelNum]);
+      Serial.printf(" CH%i: %i µs\n", channelNum, pulse[channelNum].getValue());
     }
     Serial.printf("Throttle: %i/%i\n", currentThrottle, maxRpm);
     Serial.printf("States:\n");
@@ -2376,7 +2472,7 @@ void channelZero()
 {
   for (uint8_t i = 1; i < PULSE_ARRAY_SIZE; i++)
   {
-    pulseWidth[i] = 1500;
+    pulse[i].setValue(pulse[i].getZero());
   }
 }
 
@@ -2395,7 +2491,7 @@ void failsafeRcSignals()
     for (uint8_t i = 1; i < PULSE_ARRAY_SIZE; i++)
     {
       if (i != 1 && i != 2 && i != 8 && i != 9)
-        pulseWidth[i] = pulseZero[i]; // Channels to zero position, but never for CH1 (Steering), CH8, CH9
+        pulse[i].setValue(pulse[i].getZero()); // Channels to zero position, but never for CH1 (Steering), CH8, CH9
     }
   }
 }
@@ -2473,10 +2569,10 @@ void mcpwmOutput()
       steeringDeviation = constrain(steeringDeviation, 1, 10);
       steeringDelayMicros = micros();
 
-      if (pulseWidth[1] < 1500)
-        steeringServoMicros = map(pulseWidth[1], 1000, 1500, CH1L, CH1C);
-      else if (pulseWidth[1] > 1500)
-        steeringServoMicros = map(pulseWidth[1], 1500, 2000, CH1C, CH1R);
+      if (pulse[1].getValue() < 1500)
+        steeringServoMicros = map(pulse[1].getValue(), 1000, 1500, CH1L, CH1C);
+      else if (pulse[1].getValue() > 1500)
+        steeringServoMicros = map(pulse[1].getValue(), 1500, 2000, CH1C, CH1R);
       else
         steeringServoMicros = CH1C;
       if (steeringServoMicrosDelayed < steeringServoMicros)
@@ -2835,36 +2931,11 @@ void mapThrottle()
   // Input is around 1000 - 2000us, output 0-500 for forward and backwards
 
 #if defined TRACKED_MODE        // Dual throttle input for caterpillar vehicles ------------------
-  int16_t currentThrottleLR[4]; // 2 & 3 is used, so required array size = 4!
 
-  // check if pulsewidths 2 + 3 look like servo pulses
-  for (int i = 2; i < 4; i++)
-  {
-    if (pulseWidth[i] > pulseMinLimit[i] && pulseWidth[i] < pulseMaxLimit[i])
-    {
-      if (pulseWidth[i] < pulseMin[i])
-        pulseWidth[i] = pulseMin[i]; // Constrain the value
-      if (pulseWidth[i] > pulseMax[i])
-        pulseWidth[i] = pulseMax[i];
-
-      // calculate a throttle value from the pulsewidth signal
-      if (pulseWidth[i] > pulseMaxNeutral[i])
-      {
-        currentThrottleLR[i] = map(pulseWidth[i], pulseMaxNeutral[i], pulseMax[i], 0, 500);
-      }
-      else if (pulseWidth[i] < pulseMinNeutral[i])
-      {
-        currentThrottleLR[i] = map(pulseWidth[i], pulseMinNeutral[i], pulseMin[i], 0, 500);
-      }
-      else
-      {
-        currentThrottleLR[i] = 0;
-      }
-    }
-  }
-
+  const int16_t currentThrottleL = pulse[2].getAbsolute();
+  const int16_t currentThrottleR = pulse[3].getAbsolute();
   // Mixing both sides together (take the bigger value)
-  currentThrottle = max(currentThrottleLR[2], currentThrottleLR[3]);
+  currentThrottle = max(currentThrottleL, currentThrottleR);
 
   // Print debug infos
   static unsigned long printTrackedMillis;
@@ -2874,8 +2945,8 @@ void mapThrottle()
     printTrackedMillis = millis();
 
     Serial.printf("TRACKED DEBUG:\n");
-    Serial.printf("currentThrottleLR[2]: %i\n", currentThrottleLR[2]);
-    Serial.printf("currentThrottleLR[3]: %i\n", currentThrottleLR[3]);
+    Serial.printf("currentThrottleL: %i\n", currentThrottleL);
+    Serial.printf("currentThrottleR: %i\n", currentThrottleR);
     Serial.printf("currentThrottle: %i\n", currentThrottle);
   }
 #endif // TRACKED_DEBUG
@@ -2887,9 +2958,9 @@ void mapThrottle()
   static uint8_t rpmLowering;
 
   // calculate a throttle value from the pulsewidth signal (forward only)
-  if (pulseWidth[3] > pulseMaxNeutral[3])
+  if (pulse[3].isForward())
   {
-    currentThrottle = map(pulseWidth[3], pulseMaxNeutral[3], pulseMax[3], 0, (500 - rpmLowering));
+    currentThrottle = pulse[3].getAbsolute(rpmLowering);
   }
   else
   {
@@ -2897,7 +2968,7 @@ void mapThrottle()
   }
 
   // Engine on / off via 3 position switch
-  if (pulseWidth[3] < 1200 && currentRpm < 50)
+  if (pulse[3].getValue() < 1200 && currentRpm < 50)
   { // Off
     engineInit = true;
     engineOn = false;
@@ -2910,7 +2981,7 @@ void mapThrottle()
   }
 
   // Engine RPM lowering, if hydraulic not used for 5s
-  if (hydraulicLoad > 1 || pulseWidth[3] < pulseMaxNeutral[3])
+  if (hydraulicLoad > 1 || !pulse[3].isForward())
     rpmLoweringMillis = millis();
   if (millis() - rpmLoweringMillis > 5000)
     rpmLowering = 250; // Medium RPM
@@ -2924,9 +2995,9 @@ void mapThrottle()
   clutchEngagingPoint = 500;
 
   // calculate a throttle value from the pulsewidth signal (forward only, throttle zero @1000)
-  if (pulseWidth[3] > 1100)
+  if (pulse[3].getValue() > 1100)
   {
-    currentThrottle = map(pulseWidth[3], 1100, 2000, 0, 500);
+    currentThrottle = map(pulse[3].getValue(), 1100, 2000, 0, 500);
   }
   else
   {
@@ -2935,28 +3006,7 @@ void mapThrottle()
 
 #else // Normal mode ---------------------------------------------------------------------------
 
-  // check if the pulsewidth looks like a servo pulse
-  if (pulseWidth[3] > pulseMinLimit[3] && pulseWidth[3] < pulseMaxLimit[3])
-  {
-    if (pulseWidth[3] < pulseMin[3])
-      pulseWidth[3] = pulseMin[3]; // Constrain the value
-    if (pulseWidth[3] > pulseMax[3])
-      pulseWidth[3] = pulseMax[3];
-
-    // calculate a throttle value from the pulsewidth signal
-    if (pulseWidth[3] > pulseMaxNeutral[3])
-    {
-      currentThrottle = map(pulseWidth[3], pulseMaxNeutral[3], pulseMax[3], 0, 500);
-    }
-    else if (pulseWidth[3] < pulseMinNeutral[3])
-    {
-      currentThrottle = map(pulseWidth[3], pulseMinNeutral[3], pulseMin[3], 0, 500);
-    }
-    else
-    {
-      currentThrottle = 0;
-    }
-  }
+  currentThrottle = pulse[3].getAbsolute();
 #endif
 
   // Auto throttle --------------------------------------------------------------------------
@@ -3076,12 +3126,7 @@ void mapThrottle()
   uint8_t brakeSquealVolume = 0;
 
   // Cornering squealing
-  if (pulseWidth[1] < 1500)
-    steeringAngle = map(pulseWidth[1], 1000, 1500, 100, 0);
-  else if (pulseWidth[1] > 1500)
-    steeringAngle = map(pulseWidth[1], 1500, 2000, 0, 100);
-  else
-    steeringAngle = 0;
+  steeringAngle = pulse[1].getAbsolute() / 5;
 
   tireSquealVolume = steeringAngle * currentSpeed * currentSpeed / 125000; // Volume = steering angle * speed * speed
 
@@ -3736,9 +3781,9 @@ void gearboxDetection()
 
 #if not defined VIRTUAL_16_SPEED_SEQUENTIAL && not defined SEMI_AUTOMATIC // 3 gears, selected by 3 position switch **************
   // Gear detection
-  if (pulseWidth[2] > 1700)
+  if (pulse[2].getValue() > 1700)
     selectedGear = 3;
-  else if (pulseWidth[2] < 1300)
+  else if (pulse[2].getValue() < 1300)
     selectedGear = 1;
   else
     selectedGear = 2;
@@ -3747,17 +3792,17 @@ void gearboxDetection()
 #endif                                                                    // End of manual 3 speed *************************************************************************************************
 
 #if defined VIRTUAL_16_SPEED_SEQUENTIAL // 16 gears, selected by up / down impulses *********************************************
-  if (pulseWidth[2] > 1700 && selectedGear < 16 && !sequentialLock)
+  if (pulse[2].getValue() > 1700 && selectedGear < 16 && !sequentialLock)
   {
     sequentialLock = true;
     selectedGear++;
   }
-  else if (pulseWidth[2] < 1300 && selectedGear > 1 && !sequentialLock)
+  else if (pulse[2].getValue() < 1300 && selectedGear > 1 && !sequentialLock)
   {
     sequentialLock = true;
     selectedGear--;
   }
-  if (pulseWidth[2] > 1400 && pulseWidth[2] < 1600)
+  if (pulse[2].getValue() > 1400 && pulse[2].getValue() < 1600)
     sequentialLock = false;
 #endif                                  // End of VIRTUAL_16_SPEED_SEQUENTIAL *************************************************************************************
 
@@ -3924,43 +3969,50 @@ void automaticGearSelector()
 // =======================================================================================================
 //
 
-static uint16_t escPulseWidth = 1500;
-static uint16_t escPulseWidthOut = 1500;
-static uint16_t escSignal = 1500;
+
+/** Esc pulse with:
+ *  - Additional takeoff punch around zero
+ *  - Additional power for ESC with slow reverse
+ */
+static Pulse escPulse;
+
+/** For the esc output we use a curve that allows fine-tuning
+ *  of maximum output and around zero.
+ *
+ */
+#ifndef ESC_DIR
+float curveEscOut[][2] = {
+  {0, 0} // {input value, output value}
+  , {1500 - escPulseSpan + escReversePlus, 1500 - pulseSpan}
+  , {1500 - pulseNeutral,                  1500 - escTakeoffPunch}
+  , {1500 + pulseNeutral,                  1500 + escTakeoffPunch}
+  , {1500 + escPulseSpan,                  1500 + pulseSpan}
+  , {10000, 2000}
+};
+#else // reverse direction
+float curveEscOut[][2] = {
+  {0, 2000} // {input value, output value}
+  , {1500 - escPulseSpan + escReversePlus, 1500 + pulseSpan}
+  , {1500 - pulseNeutral,                  1500 + escTakeoffPunch}
+  , {1500 + pulseNeutral,                  1500 - escTakeoffPunch}
+  , {1500 + escPulseSpan,                  1500 - pulseSpan}
+  , {10000, 0}
+};
+#endif
+
+// --- for esc output
+
+static uint16_t escPulseWidthOut = 1500; /// internal value after esc calibration
+static uint16_t escSignal = 1500; /// internal value after range calibration
+
 static uint8_t motorDriverDuty = 0;
 static unsigned long escMillis;
 static unsigned long lastStateTime;
-// static int8_t pulse; // -1 = reverse, 0 = neutral, 1 = forward
-// static int8_t escPulse; // -1 = reverse, 0 = neutral, 1 = forward
 static int8_t driveRampRate;
 static int8_t driveRampGain;
 static int8_t brakeRampRate;
 uint16_t escRampTime;
 
-// ESC sub functions =============================================
-// We always need the data up to date, so these comparators are programmed as sub functions!
-int8_t pulse()
-{ // Throttle direction
-  int8_t pulse;
-  if (pulseWidth[3] > pulseMaxNeutral[3] && pulseWidth[3] < pulseMaxLimit[3])
-    pulse = 1; // 1 = Forward
-  else if (pulseWidth[3] < pulseMinNeutral[3] && pulseWidth[3] > pulseMinLimit[3])
-    pulse = -1; // -1 = Backwards
-  else
-    pulse = 0; // 0 = Neutral
-  return pulse;
-}
-int8_t escPulse()
-{ // ESC direction
-  int8_t escPulse;
-  if (escPulseWidth > pulseMaxNeutral[3] && escPulseWidth < pulseMaxLimit[3])
-    escPulse = 1; // 1 = Forward
-  else if (escPulseWidth < pulseMinNeutral[3] && escPulseWidth > pulseMinLimit[3])
-    escPulse = -1; // -1 = Backwards
-  else
-    escPulse = 0; // 0 = Neutral
-  return escPulse;
-}
 
 // If you connect your ESC to pin 33, the vehicle inertia is simulated. Direct brake (crawler) ESC required
 // *** WARNING!! Do it at your own risk!! There is a failsafe function in case, the signal input from the
@@ -4055,7 +4107,7 @@ void esc()
   }
 
   // Additional brake detection signal, applied immediately. Used to prevent sound issues, if braking very quickly
-  brakeDetect = ((pulse() == 1 && escPulse() == -1) || (pulse() == -1 && escPulse() == 1));
+  brakeDetect = ((pulse[3].direction() == 1 && escPulse.direction() == -1) || (pulse[3].direction() == -1 && escPulse.direction() == 1));
 
 #ifdef ESC_DEBUG
   if (millis() - lastStateTime > 300)
@@ -4063,17 +4115,13 @@ void esc()
     lastStateTime = millis();
     Serial.printf("ESC_DEBUG:\n");
     Serial.printf("driveState:            %i\n", driveState);
-    Serial.printf("pulse():               %i\n", pulse());
-    Serial.printf("escPulse():            %i\n", escPulse());
+    Serial.printf("direction:             %i\n", pulse[3].direction());
+    Serial.printf("escPulse:              %i\n", escPulse.getValue());
     Serial.printf("brakeDetect:           %s\n", brakeDetect ? "true" : "false");
-    Serial.printf("escPulseMin:           %i\n", escPulseMin);
-    Serial.printf("escPulseMinNeutral:    %i\n", escPulseMinNeutral);
-    Serial.printf("escPulseMaxNeutral:    %i\n", escPulseMaxNeutral);
-    Serial.printf("escPulseMax:           %i\n", escPulseMax);
     Serial.printf("brakeRampRate:         %i\n", brakeRampRate);
     Serial.printf("lowRange:              %s\n", lowRange ? "true" : "false");
     Serial.printf("currentRpm:            %i\n", currentRpm);
-    Serial.printf("escPulseWidth:         %i\n", escPulseWidth);
+    Serial.printf("escPulse:              %i\n", escPulse.value());
     Serial.printf("escPulseWidthOut:      %i\n", escPulseWidthOut);
     Serial.printf("escSignal:             %i\n", escSignal);
     Serial.printf("motorDriverDuty:       %i\n", motorDriverDuty);
@@ -4097,14 +4145,13 @@ void esc()
       escIsBraking = false;
       escInReverse = false;
       escIsDriving = false;
-      escPulseWidth = pulseZero[3]; // ESC to neutral position
 #ifdef VIRTUAL_16_SPEED_SEQUENTIAL
       selectedGear = 1;
 #endif
 
-      if (pulse() == 1 && engineRunning && !neutralGear)
+      if (pulse[3].direction() == 1 && engineRunning && !neutralGear)
         driveState = 1; // Driving forward
-      if (pulse() == -1 && engineRunning && !neutralGear)
+      if (pulse[3].direction() == -1 && engineRunning && !neutralGear)
         driveState = 3; // Driving backwards
       break;
 
@@ -4112,40 +4159,37 @@ void esc()
       escIsBraking = false;
       escInReverse = false;
       escIsDriving = true;
-      if (escPulseWidth < pulseWidth[3] && currentSpeed < speedLimit && !batteryProtection)
+      if (escPulse.getValue() < pulse[3].getValue() &&
+          currentSpeed < speedLimit && !batteryProtection)
       {
-        if (escPulseWidth >= escPulseMaxNeutral)
-          escPulseWidth += (driveRampRate * driveRampGain); // Faster
+        if (escPulse.isForward())
+          escPulse.increase(driveRampRate * driveRampGain); // Faster
         else
-          escPulseWidth = escPulseMaxNeutral; // Initial boost
+          escPulse.increase(pulseNeutral); // Initial boost
       }
-      if ((escPulseWidth > pulseWidth[3] || batteryProtection) && escPulseWidth > pulseZero[3])
-        escPulseWidth -= (driveRampRate * driveRampGain); // Slower
+      if ((escPulse.getValue() > pulse[3].getValue() || batteryProtection) && escPulse.isPositive())
+        escPulse.decrease(driveRampRate * driveRampGain); // Slower
 
       if (gearUpShiftingPulse && shiftingAutoThrottle && !automatic && !doubleClutch)
       {                                                                    // lowering RPM, if shifting up transmission
 #if not defined VIRTUAL_3_SPEED && not defined VIRTUAL_16_SPEED_SEQUENTIAL // Only, if we have a real 3 speed transmission
-        escPulseWidth -= currentSpeed / 4;                                 // Synchronize engine speed
-                                                                           // escPulseWidth -= currentSpeed * 40 / 100; // Synchronize engine speed TODO
+        escPulse.decrease(currentSpeed / 4);                                 // Synchronize engine speed
 #endif
         gearUpShiftingPulse = false;
-        escPulseWidth = constrain(escPulseWidth, pulseZero[3], pulseMax[3]);
       }
       if (gearDownShiftingPulse && shiftingAutoThrottle && !automatic && !doubleClutch)
       {                                                                    // increasing RPM, if shifting down transmission
 #if not defined VIRTUAL_3_SPEED && not defined VIRTUAL_16_SPEED_SEQUENTIAL // Only, if we have a real 3 speed transmission
-        escPulseWidth += 50;                                               // Synchronize engine speed
-                                                                           // escPulseWidth += currentSpeed;// * 40 / 100; // Synchronize engine speed TODO
+        escPulse.increase(50);                                               // Synchronize engine speed
 #endif
         gearDownShiftingPulse = false;
-        escPulseWidth = constrain(escPulseWidth, pulseZero[3], pulseMax[3]);
       }
 
-      if (pulse() == -1 && escPulse() == 1)
+      if (pulse[3].direction() == -1 && escPulse.direction() == 1)
         driveState = 2; // Braking forward
-      if (pulse() == -1 && escPulse() == 0)
+      if (pulse[3].direction() == -1 && escPulse.direction() == 0)
         driveState = 3; // Driving backwards, if ESC not yet moving. Prevents state machine from hanging! v9.7.0
-      if (pulse() == 0 && escPulse() == 0)
+      if (pulse[3].direction() == 0 && escPulse.direction() == 0)
         driveState = 0; // standing still
       break;
 
@@ -4153,19 +4197,19 @@ void esc()
       escIsBraking = true;
       escInReverse = false;
       escIsDriving = false;
-      if (escPulseWidth > pulseZero[3])
-        escPulseWidth -= brakeRampRate; // brake with variable deceleration
-      if (escPulseWidth < pulseZero[3] + brakeMargin && pulse() == -1)
-        escPulseWidth = pulseZero[3] + brakeMargin; // Don't go completely back to neutral, if brake applied
-      if (escPulseWidth < pulseZero[3] && pulse() == 0)
-        escPulseWidth = pulseZero[3]; // Overflow prevention!
+      if (escPulse.isPositive())
+        escPulse.decrease(brakeRampRate); // brake with variable deceleration
+      if (escPulse.getValue() < escPulse.getZero() + brakeMargin && pulse[3].direction() == -1)
+        escPulse.setValue(escPulse.getZero() + brakeMargin); // Don't go completely back to neutral, if brake applied
+      if (!escPulse.isPositive() && pulse[3].isNeutral())
+        escPulse.setValue(escPulse.getZero()); // Overflow prevention!
 
-      if (pulse() == 0 && escPulse() == 1 && !neutralGear)
+      if (pulse[3].direction() == 0 && escPulse.direction() == 1 && !neutralGear)
       {
         driveState = 1; // Driving forward
         airBrakeTrigger = true;
       }
-      if (pulse() == 0 && escPulse() == 0)
+      if (pulse[3].direction() == 0 && escPulse.direction() == 0)
       {
         driveState = 0; // standing still
         airBrakeTrigger = true;
@@ -4176,38 +4220,36 @@ void esc()
       escIsBraking = false;
       escInReverse = true;
       escIsDriving = true;
-      if (escPulseWidth > pulseWidth[3] && currentSpeed < speedLimit && !batteryProtection)
+      if (escPulse.getValue() > pulse[3].getValue() && currentSpeed < speedLimit && !batteryProtection)
       {
-        if (escPulseWidth <= escPulseMinNeutral)
-          escPulseWidth -= (driveRampRate * driveRampGain); // Faster
+        if (escPulse.isBackward())
+          escPulse.decrease(driveRampRate * driveRampGain); // Faster
         else
-          escPulseWidth = escPulseMinNeutral; // Initial boost
+          escPulse.decrease(pulseNeutral); // Initial boost
       }
-      if ((escPulseWidth < pulseWidth[3] || batteryProtection) && escPulseWidth < pulseZero[3])
-        escPulseWidth += (driveRampRate * driveRampGain); // Slower
+      if ((escPulse.getValue() < pulse[3].getValue() || batteryProtection) && !escPulse.isPositive())
+        escPulse.increase(driveRampRate * driveRampGain); // Slower
 
       if (gearUpShiftingPulse && shiftingAutoThrottle && !automatic && !doubleClutch)
       {                                                                    // lowering RPM, if shifting up transmission
 #if not defined VIRTUAL_3_SPEED && not defined VIRTUAL_16_SPEED_SEQUENTIAL // Only, if we have a real 3 speed transmission
-        escPulseWidth += currentSpeed / 4;                                 // Synchronize engine speed
+        escPulse.increase(currentSpeed / 4);                                 // Synchronize engine speed
 #endif
         gearUpShiftingPulse = false;
-        escPulseWidth = constrain(escPulseWidth, pulseMin[3], pulseZero[3]);
       }
       if (gearDownShiftingPulse && shiftingAutoThrottle && !automatic && !doubleClutch)
       {                                                                    // increasing RPM, if shifting down transmission
 #if not defined VIRTUAL_3_SPEED && not defined VIRTUAL_16_SPEED_SEQUENTIAL // Only, if we have a real 3 speed transmission
-        escPulseWidth -= 50;                                               // Synchronize engine speed
+        escPulse.decrease(50);                                               // Synchronize engine speed
 #endif
         gearDownShiftingPulse = false;
-        escPulseWidth = constrain(escPulseWidth, pulseMin[3], pulseZero[3]);
       }
 
-      if (pulse() == 1 && escPulse() == -1)
+      if (pulse[3].direction() == 1 && escPulse.direction() == -1)
         driveState = 4; // Braking backwards
-      if (pulse() == 1 && escPulse() == 0)
+      if (pulse[3].direction() == 1 && escPulse.direction() == 0)
         driveState = 1; // Driving forward, if ESC not yet moving. Prevents state machine from hanging! v9.7.0
-      if (pulse() == 0 && escPulse() == 0)
+      if (pulse[3].direction() == 0 && escPulse.direction() == 0)
         driveState = 0; // standing still
       break;
 
@@ -4215,19 +4257,19 @@ void esc()
       escIsBraking = true;
       escInReverse = true;
       escIsDriving = false;
-      if (escPulseWidth < pulseZero[3])
-        escPulseWidth += brakeRampRate; // brake with variable deceleration
-      if (escPulseWidth > pulseZero[3] - brakeMargin && pulse() == 1)
-        escPulseWidth = pulseZero[3] - brakeMargin; // Don't go completely back to neutral, if brake applied
-      if (escPulseWidth > pulseZero[3] && pulse() == 0)
-        escPulseWidth = pulseZero[3]; // Overflow prevention!
+      if (!escPulse.isPositive())
+        escPulse.increase(brakeRampRate); // brake with variable deceleration
+      if (escPulse.getValue() > escPulse.getZero() - brakeMargin && pulse[3].direction() == 1)
+        escPulse.setValue(escPulse.getZero() - brakeMargin); // Don't go completely back to neutral, if brake applied
+      if (escPulse.isPositive() && pulse[3].isNeutral())
+        escPulse.setValue(escPulse.getZero()); // Overflow prevention!
 
-      if (pulse() == 0 && escPulse() == -1 && !neutralGear)
+      if (pulse[3].direction() == 0 && escPulse.direction() == -1 && !neutralGear)
       {
         driveState = 3; // Driving backwards
         airBrakeTrigger = true;
       }
-      if (pulse() == 0 && escPulse() == 0)
+      if (pulse[3].direction() == 0 && escPulse.direction() == 0)
       {
         driveState = 0; // standing still
         airBrakeTrigger = true;
@@ -4249,20 +4291,15 @@ void esc()
 
       // ESC linearity compensation ---------------------
 #ifdef QUICRUN_FUSION
-    escPulseWidthOut = reMap(curveQuicrunFusion, escPulseWidth);
+    escPulseWidthOut = reMap(curveQuicrunFusion, escPulse.getValue());
 #elif defined QUICRUN_16BL30
-    escPulseWidthOut = reMap(curveQuicrun16BL30, escPulseWidth);
+    escPulseWidthOut = reMap(curveQuicrun16BL30, escPulse.getValue());
 #else
-    escPulseWidthOut = escPulseWidth;
+    escPulseWidthOut = escPulse.getValue();
 #endif // --------------------------------------------
 
     // ESC range & direction calibration -------------
-#ifndef ESC_DIR
-    // escSignal = escPulseWidthOut;
-    escSignal = map(escPulseWidthOut, escPulseMin, escPulseMax, 1000, 2000);
-#else
-    escSignal = map(escPulseWidthOut, escPulseMax, escPulseMin, 1000, 2000); // direction inversed
-#endif // --------------------------------------------
+    escSignal = reMap(curveEscOut, escPulse.getValue());
 
 #if not defined RZ7886_DRIVER_MODE                                             // Classic crawler style RC ESC mode ----
     mcpwm_set_duty_in_us(MCPWM_UNIT_1, MCPWM_TIMER_0, MCPWM_OPR_A, escSignal); // ESC now using MCPWM
@@ -4299,16 +4336,7 @@ void esc()
 #endif
 
     // Calculate a speed value from the pulsewidth signal (used as base for engine sound RPM while clutch is engaged)
-    if (escPulseWidth > pulseMaxNeutral[3])
-    {
-      currentSpeed = map(escPulseWidth, pulseMaxNeutral[3], pulseMax[3], 0, 500);
-    }
-    else if (escPulseWidth < pulseMinNeutral[3])
-    {
-      currentSpeed = map(escPulseWidth, pulseMinNeutral[3], pulseMin[3], 0, 500);
-    }
-    else
-      currentSpeed = 0;
+    currentSpeed = escPulse.getAbsolute();
   }
 #endif
 }
@@ -4381,7 +4409,7 @@ void triggerHorn()
     rampsDown = false;
 
     // detect horn trigger ( impulse length > 1900us) -------------
-    if (pulseWidth[4] > 1900 && pulseWidth[4] < pulseMaxLimit[4])
+    if (pulse[4].getValue() > 1900)
     {
       hornTrigger = true;
       hornLatch = true;
@@ -4394,7 +4422,7 @@ void triggerHorn()
 #if not defined EXCAVATOR_MODE
 #ifndef NO_SIREN
     // detect siren trigger ( impulse length < 1100us) ----------
-    if (pulseWidth[4] < 1100 && pulseWidth[4] > pulseMinLimit[4])
+    if (pulse[4].getValue() < 1100)
     {
       sirenTrigger = true;
       sirenLatch = true;
@@ -4408,7 +4436,7 @@ void triggerHorn()
 
     // detect bluelight trigger ( impulse length < 1300us) ----------
     static uint32_t bluelightOffDelay = millis();
-    if ((pulseWidth[4] < 1300 && pulseWidth[4] > pulseMinLimit[4]) || sirenLatch)
+    if ((pulse[4].getValue() < 1300) || sirenLatch)
     {
       bluelightOffDelay = millis();
       blueLightTrigger = true;
@@ -4427,13 +4455,13 @@ void triggerHorn()
     rampsDown = false;
 
     // legs down ( impulse length > 1900us) -------------
-    if (pulseWidth[4] > 1900 && pulseWidth[4] < pulseMaxLimit[4])
+    if (pulse[4].getValue() > 1900)
       legsDown = true;
     else
       legsDown = false;
 
     // legs up ( impulse length < 1100us) -------------
-    if (pulseWidth[4] < 1100 && pulseWidth[4] > pulseMinLimit[4])
+    if (pulse[4].getValue() < 1100)
       legsUp = true;
     else
       legsUp = false;
@@ -4447,13 +4475,13 @@ void triggerHorn()
     legsDown = false;
 
     // ramps down ( impulse length > 1900us) -------------
-    if (pulseWidth[4] > 1900 && pulseWidth[4] < pulseMaxLimit[4])
+    if (pulse[4].getValue() > 1900)
       rampsDown = true;
     else
       rampsDown = false;
 
     // ramps up ( impulse length < 1100us) -------------
-    if (pulseWidth[4] < 1100 && pulseWidth[4] > pulseMinLimit[4])
+    if (pulse[4].getValue() < 1100)
       rampsUp = true;
     else
       rampsUp = false;
@@ -4467,13 +4495,13 @@ void triggerHorn()
     rampsDown = false;
 
     // pull winch ( impulse length > 1900us) -------------
-    if (pulseWidth[4] > 1900 && pulseWidth[4] < pulseMaxLimit[4])
+    if (pulse[4].getValue() > 1900)
       winchPull = true;
     else
       winchPull = false;
 
     // release winch ( impulse length < 1100us) -------------
-    if (pulseWidth[4] < 1100 && pulseWidth[4] > pulseMinLimit[4])
+    if (pulse[4].getValue() < 1100)
       winchRelease = true;
     else
       winchRelease = false;
@@ -4496,55 +4524,55 @@ void triggerIndicators()
 
 #ifdef AUTO_INDICATORS // Automatic, steering triggered indicators ********
   // detect left indicator trigger -------------
-  if (pulseWidth[1] > (1500 + indicatorOn))
+  if (pulse[1].getValue() > (1500 + indicatorOn))
   {
     L = true;
     R = false;
   }
-  if (pulseWidth[1] < (1500 + indicatorOn / 3))
+  if (pulse[1].getValue() < (1500 + indicatorOn / 3))
     L = false;
 
   // detect right indicator trigger -------------
-  if (pulseWidth[1] < (1500 - indicatorOn))
+  if (pulse[1].getValue() < (1500 - indicatorOn))
   {
     R = true;
     L = false;
   }
-  if (pulseWidth[1] > (1500 - indicatorOn / 3))
+  if (pulse[1].getValue() > (1500 - indicatorOn / 3))
     R = false;
 
 #else // Manually triggered indicators ********
   // detect left indicator trigger -------------
-  if (pulseWidth[6] > 1900)
+  if (pulse[6].getValue() > 1900)
   {
     L = true;
     R = false;
   }
-  if (pulseWidth[6] < (1500 - indicatorOn / 3))
+  if (pulse[6].getValue() < (1500 - indicatorOn / 3))
     L = false;
 
   // detect right indicator trigger -------------
-  if (pulseWidth[6] < 1100)
+  if (pulse[6].getValue() < 1100)
   {
     R = true;
     L = false;
   }
-  if (pulseWidth[6] > (1500 + indicatorOn / 3))
+  if (pulse[6].getValue() > (1500 + indicatorOn / 3))
     R = false;
 
   // Reset by steering -------------
   static int steeringOld;
 
-  if (pulseWidth[1] < steeringOld - 50)
+  if (pulse[1].getValue() < steeringOld - 50)
   {
     L = false;
-    steeringOld = pulseWidth[1];
+    steeringOld = pulse[1].getValue();
   }
 
-  if (pulseWidth[1] > steeringOld + 50)
+  if (pulse[1].getValue() > steeringOld + 50)
   {
     R = false;
-    steeringOld = pulseWidth[1];
+    steeringOld = pulse[1].getValue();
   }
 
 #endif // End of manually triggered indicators
@@ -4585,7 +4613,7 @@ void rcTriggerRead()
   // CH5 (FUNCTION_R) ----------------------------------------------------------------------
   // Cycling light state machine, if dual rate @75% and long in position -----
   static bool lightsStateLock;
-  if (functionR75u.toggleLong(pulseWidth[5], 1150) != lightsStateLock)
+  if (functionR75u.toggleLong(pulse[5].getValue(), 1150) != lightsStateLock)
   {
     if (lightsState >= 5)
       lightsState = 0;
@@ -4596,18 +4624,18 @@ void rcTriggerRead()
 
   // Toggling high / low beam, if dual rate @100% and short in position
   static bool beamStateLock;
-  if (functionR100u.toggleLong(pulseWidth[5], 1000) != beamStateLock)
+  if (functionR100u.toggleLong(pulse[5].getValue(), 1000) != beamStateLock)
   {
     headLightsHighBeamOn = !headLightsHighBeamOn; // This lock is required, because high / low beam needs to be able to be changed in other program sections!
     beamStateLock = !beamStateLock;
   }
 
   // Headlight flasher as long as in position, if dual rate @100% -----
-  headLightsFlasherOn = functionR100u.momentary(pulseWidth[5], 1000);
+  headLightsFlasherOn = functionR100u.momentary(pulse[5].getValue(), 1000);
 
   // Jake brake as long as in position, if dual rate @100% -----
 #ifdef JAKE_BRAKE_SOUND
-  jakeBrakeRequest = functionR100d.momentary(pulseWidth[5], 2000) && currentRpm > jakeBrakeMinRpm;
+  jakeBrakeRequest = functionR100d.momentary(pulse[5].getValue(), 2000) && currentRpm > jakeBrakeMinRpm;
 #endif
 
   // Volume adjustment, if vehicle standing still and dual rate @100%
@@ -4615,8 +4643,8 @@ void rcTriggerRead()
   static uint8_t volumeIndex = 0;
   if (driveState == 0)
   {
-    // if (functionR100d.toggleLong(pulseWidth[5], 2000)) masterVolume = masterVolumePercentage[1]; else masterVolume = masterVolumePercentage[0]; // Change volume between indoor and outdoor mode
-    if (functionR100d.toggleLong(pulseWidth[5], 2000) != volumeStateLock)
+    // if (functionR100d.toggleLong(pulse[5].getValue(), 2000)) masterVolume = masterVolumePercentage[1]; else masterVolume = masterVolumePercentage[0]; // Change volume between indoor and outdoor mode
+    if (functionR100d.toggleLong(pulse[5].getValue(), 2000) != volumeStateLock)
     {
       if (volumeIndex < numberOfVolumeSteps - 1)
         volumeIndex++; // Switch volume steps
@@ -4632,7 +4660,7 @@ void rcTriggerRead()
   static bool engineStateLock;
   if (driveState == 0 && (engineState == OFF || engineState == RUNNING))
   { // Only, if vehicle stopped and engine idling or off!
-    if (functionR75d.toggleLong(pulseWidth[5], 1850) != engineStateLock)
+    if (functionR75d.toggleLong(pulse[5].getValue(), 1850) != engineStateLock)
     {
       engineOn = !engineOn; // This lock is required, because engine on / off needs to be able to be changed in other program sections!
       engineStateLock = !engineStateLock;
@@ -4647,7 +4675,7 @@ void rcTriggerRead()
   // Hazards on / off, if dual rate @75% and long in position -----
 #ifndef AUTO_INDICATORS
   static bool hazardStateLock;
-  if (functionL75l.toggleLong(pulseWidth[6], 1150) != hazardStateLock)
+  if (functionL75l.toggleLong(pulse[6].getValue(), 1150) != hazardStateLock)
   {
     hazard = !hazard;
     hazardStateLock = !hazardStateLock;
@@ -4658,7 +4686,7 @@ void rcTriggerRead()
   static bool fifthWheelStateLock;
   if (driveState == 0)
   { // Only allow change, if vehicle stopped!
-    if (functionL75r.toggleLong(pulseWidth[6], 1850) != fifthWheelStateLock)
+    if (functionL75r.toggleLong(pulse[6].getValue(), 1850) != fifthWheelStateLock)
     {
       unlock5thWheel = !unlock5thWheel;
       fifthWheelStateLock = !fifthWheelStateLock;
@@ -4668,13 +4696,13 @@ void rcTriggerRead()
   // Latching 2 position switches ******************************************************************
 
   // Mode 1 ----
-  mode1 = mode1Trigger.onOff(pulseWidth[8], 1800, 1200); // CH8 (MODE1)
+  mode1 = mode1Trigger.onOff(pulse[8].getValue(), 1800, 1200); // CH8 (MODE1)
 #ifdef TRANSMISSION_NEUTRAL
   neutralGear = mode1; // Transmission neutral
 #endif
 
   // Mode 2 ----
-  mode2 = mode2Trigger.onOff(pulseWidth[9], 1800, 1200); // CH9 (MODE2)
+  mode2 = mode2Trigger.onOff(pulse[9].getValue(), 1800, 1200); // CH9 (MODE2)
 
 #if defined MODE2_WINCH // Winch control mode
   if (mode2)
@@ -4704,7 +4732,7 @@ void rcTriggerRead()
   static bool engineStateLock2;
   if (driveState == 0 && (engineState == OFF || engineState == RUNNING))
   { // Only, if vehicle stopped and engine idling or off!
-    if (momentary1Trigger.toggleLong(pulseWidth[10], 2000) != engineStateLock2)
+    if (momentary1Trigger.toggleLong(pulse[10.getValue()], 2000) != engineStateLock2)
     {
       engineOn = !engineOn; // This lock is required, because engine on / off needs to be able to be changed in other program sections!
       engineStateLock2 = !engineStateLock2;
@@ -4714,10 +4742,10 @@ void rcTriggerRead()
 
   // Flags ******************************************************************
 #ifndef AUTO_INDICATORS
-  // left = indicatorLTrigger.onOff(pulseWidth[12], 1800, 1200); // CH12 INDICATOR_LEFT not used
-  // right = indicatorRTrigger.onOff(pulseWidth[13], 1800, 1200); // CH13 INDICATOR_RIGHT not used
+  // left = indicatorLTrigger.onOff(pulse[12.getValue()], 1800, 1200); // CH12 INDICATOR_LEFT not used
+  // right = indicatorRTrigger.onOff(pulse[13.getValue()], 1800, 1200); // CH13 INDICATOR_RIGHT not used
 #else
-  hazard = hazardsTrigger.onOff(pulseWidth[11], 1800, 1200); // CH11 HAZARDS
+  hazard = hazardsTrigger.onOff(pulse[11].getValue(), 1800, 1200); // CH11 HAZARDS
 #endif
 
 #endif
@@ -4975,7 +5003,7 @@ void updateRGBLEDs()
   { // Every 20 ms
     lastNeopixelTime = millis();
 
-    uint8_t hue = map(pulseWidth[1], 1000, 2000, 0, 255);
+    uint8_t hue = map(pulse[1].getValue(), 1000, 2000, 0, 255);
 
     rgbLEDs[0] = CHSV(hue, hue < 255 ? 255 : 0, hue > 0 ? 255 : 0);
     rgbLEDs[1] = CRGB::Red;
@@ -5155,7 +5183,7 @@ void updateRGBLEDs()
   { // Every 20 ms
     lastNeopixelTime = millis();
 
-    uint8_t hue = map(pulseWidth[7], 1000, 2000, 0, 255); // map pulseWidth[7] from poti VRA to hue
+    uint8_t hue = map(pulse[7].getValue(), 1000, 2000, 0, 255); // map pulse[7].getValue() from poti VRA to hue
     if (hue <= 20)
     { // LEDs off
       fill_solid(rgbLEDs, NEOPIXEL_COUNT, CRGB::Black);
@@ -5207,8 +5235,8 @@ void excavatorControl()
   static uint16_t hydraulicFlowVolumeInternalUndelayed;
   static uint16_t trackRattleVolumeInternal[9];
   static uint16_t trackRattleVolumeInternalUndelayed;
-  static uint16_t lastBucketPulseWidth = pulseWidth[1];
-  static uint16_t lastDipperPulseWidth = pulseWidth[2];
+  static uint16_t lastBucketPulseWidth = pulse[1].getValue();
+  static uint16_t lastDipperPulseWidth = pulse[2].getValue();
 
   if (millis() - lastFrameTime > 4)
   { // 3
@@ -5216,34 +5244,19 @@ void excavatorControl()
 
     // Calculate zylinder speed and engine RPM dependent hydraulic pump volume ----
     // Bucket ---
-    if (pulseWidth[1] > pulseMaxNeutral[1])
-      hydraulicPumpVolumeInternal[1] = map(pulseWidth[1], pulseMaxNeutral[1], pulseMax[1], 0, 100);
-    else if (pulseWidth[1] < pulseMinNeutral[1])
-      hydraulicPumpVolumeInternal[1] = map(pulseWidth[1], pulseMinNeutral[1], pulseMin[1], 0, 100);
-    else
-      hydraulicPumpVolumeInternal[1] = 0;
+    hydraulicPumpVolumeInternal[1] = pulse[1].getAbsolute() / 5;
 
     // Dipper ---
-    if (pulseWidth[2] > pulseMaxNeutral[2])
-      hydraulicPumpVolumeInternal[2] = map(pulseWidth[2], pulseMaxNeutral[2], pulseMax[2], 0, 100);
-    else if (pulseWidth[2] < pulseMinNeutral[2])
-      hydraulicPumpVolumeInternal[2] = map(pulseWidth[2], pulseMinNeutral[2], pulseMin[2], 0, 100);
-    else
-      hydraulicPumpVolumeInternal[2] = 0;
+    hydraulicPumpVolumeInternal[2] = pulse[2].getAbsolute() / 5;
 
     // Boom (upwards only) ---
-    if (pulseWidth[5] < pulseMinNeutral[5])
-      hydraulicPumpVolumeInternal[5] = map(pulseWidth[5], pulseMinNeutral[5], (pulseMin[5] + 200), 0, 100);
+    if (pulse[5].isBackward())
+        hydraulicPumpVolumeInternal[5] = max(pulse[5].getAbsolute() / 3, 100);
     else
-      hydraulicPumpVolumeInternal[5] = 0;
+        hydraulicPumpVolumeInternal[5] = 0;
 
     // Swing ---
-    if (pulseWidth[8] > pulseMaxNeutral[8])
-      hydraulicPumpVolumeInternal[8] = map(pulseWidth[8], pulseMaxNeutral[8], (pulseMax[8] - 150), 0, 100);
-    else if (pulseWidth[8] < pulseMinNeutral[8])
-      hydraulicPumpVolumeInternal[8] = map(pulseWidth[8], pulseMinNeutral[8], (pulseMin[8] + 150), 0, 100);
-    else
-      hydraulicPumpVolumeInternal[8] = 0;
+    hydraulicPumpVolumeInternal[8] = max(pulse[8].getAbsolute() / 4, 100);
 
     hydraulicPumpVolumeInternalUndelayed = constrain(hydraulicPumpVolumeInternal[1] + hydraulicPumpVolumeInternal[2] + hydraulicPumpVolumeInternal[5] + hydraulicPumpVolumeInternal[8], 0, 100) * map(currentRpm, 0, 500, 30, 100) / 100;
 
@@ -5254,10 +5267,10 @@ void excavatorControl()
 
     // Calculate zylinder speed dependent hydraulic flow volume ----
     // Boom (downwards) ---
-    if (pulseWidth[5] > pulseMaxNeutral[5])
-      hydraulicFlowVolumeInternalUndelayed = map(pulseWidth[5], pulseMaxNeutral[5], (pulseMax[5] - 200), 0, 100);
+    if (pulse[5].isForward())
+        hydraulicFlowVolumeInternalUndelayed = max(pulse[5].getAbsolute() / 3, 100);
     else
-      hydraulicFlowVolumeInternalUndelayed = 0;
+        hydraulicFlowVolumeInternalUndelayed = 0;
 
     if (hydraulicFlowVolumeInternalUndelayed < hydraulicFlowVolume)
       hydraulicFlowVolume--;
@@ -5266,20 +5279,10 @@ void excavatorControl()
 
     // Calculate speed dependent track rattle volume ----
     // Left ---
-    if (pulseWidth[6] > pulseMaxNeutral[6])
-      trackRattleVolumeInternal[6] = map(pulseWidth[6], pulseMaxNeutral[6], (pulseMax[6] - 150), 0, 100);
-    else if (pulseWidth[6] < pulseMinNeutral[6])
-      trackRattleVolumeInternal[6] = map(pulseWidth[6], pulseMinNeutral[6], (pulseMin[6] + 150), 0, 100);
-    else
-      trackRattleVolumeInternal[6] = 0;
+    trackRattleVolumeInternal[6] = max(pulse[6].getAbsolute() / 3, 100);
 
     // Right
-    if (pulseWidth[7] > pulseMaxNeutral[7])
-      trackRattleVolumeInternal[7] = map(pulseWidth[7], pulseMaxNeutral[7], (pulseMax[7] - 100), 0, 100);
-    else if (pulseWidth[7] < pulseMinNeutral[7])
-      trackRattleVolumeInternal[7] = map(pulseWidth[7], pulseMinNeutral[7], (pulseMin[7] + 100), 0, 100);
-    else
-      trackRattleVolumeInternal[7] = 0;
+    trackRattleVolumeInternal[7] = max(pulse[7].getAbsolute() / 3, 100);
 
     if (engineRunning)
       trackRattleVolumeInternalUndelayed = constrain(trackRattleVolumeInternal[6] + trackRattleVolumeInternal[7], 0, 100) * map(currentRpm, 0, 500, 100, 150) / 100;
@@ -5301,18 +5304,18 @@ void excavatorControl()
     if (engineRunning && currentRpm > 400)
     {
       // If bucket stick is moved fast
-      if (abs(pulseWidth[1] - lastBucketPulseWidth > 100))
+      if (abs(pulse[1].getValue() - lastBucketPulseWidth > 100))
       {
         bucketRattleTrigger = true;
       }
-      lastBucketPulseWidth = pulseWidth[1];
+      lastBucketPulseWidth = pulse[1].getValue();
 
       // If dipper stick is moved fast
-      if (abs(pulseWidth[2] - lastDipperPulseWidth > 100))
+      if (abs(pulse[2].getValue() - lastDipperPulseWidth > 100))
       {
         bucketRattleTrigger = true;
       }
-      lastDipperPulseWidth = pulseWidth[2];
+      lastDipperPulseWidth = pulse[2].getValue();
     }
   }
 }
