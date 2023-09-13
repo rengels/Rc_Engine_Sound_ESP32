@@ -352,22 +352,18 @@ uint16_t pulseLimit = 1100;           // pulseZero +/- this value (1100)
  */
 class Pulse {
 private:
-    boolean  reverse;     /// this pulse is reversed from the raw input
-    boolean  exponential; /// this pulse is exponential from the raw input
-    uint16_t zero;        /// neutral pulse length in ms
-    uint16_t max;         /// maximum pulse length in ms
-    uint16_t min;         /// minimum pulse length in ms
-    uint16_t maxNeutral;  /// maximum pulse length that is considered neutral
-    uint16_t minNeutral;  /// minimum pulse length that is considered neutral
-    uint16_t maxLimit;    /// maximum pulse length that is considered valid
-    uint16_t minLimit;    /// minimum pulse length that is considered valid
+    const uint16_t zero;        /// neutral pulse length in ms
+    const uint16_t max;         /// maximum pulse length in ms
+    const uint16_t min;         /// minimum pulse length in ms
+    const uint16_t maxNeutral;  /// maximum pulse length that is considered neutral
+    const uint16_t minNeutral;  /// minimum pulse length that is considered neutral
+    const uint16_t maxLimit;    /// maximum pulse length that is considered valid
+    const uint16_t minLimit;    /// minimum pulse length that is considered valid
 
-    uint16_t value;       /// The actual value of the pulse signal
+    uint16_t value;             /// The actual value of the pulse signal
 
 public:
     Pulse():
-        reverse(false),
-        exponential(false),
         zero(1500),
         max(zero + pulseSpan),
         min(zero - pulseSpan),
@@ -383,7 +379,7 @@ public:
      *  If the value is outside of the limits it will be ignored.
      *  Clamps it at min/max
      */
-    void setValue(uint16_t raw) {
+    void setValue(const uint16_t raw) {
         if ((raw > minLimit) && (raw < maxLimit)) {
             if (raw > max) {
                 value = max;
@@ -414,7 +410,7 @@ public:
      *
      *  @param reduction: Lower the maximum value (500) by the given one.
      */
-    uint16_t getAbsolute(uint16_t reduction = 0) const {
+    uint16_t getAbsolute(const uint16_t reduction = 0) const {
         uint16_t result;
         if (value > maxNeutral) {
             result = map(value, maxNeutral, max, 0, 500 - reduction);
@@ -452,7 +448,7 @@ public:
     }
 
     /** Increases the value by the given amount. */
-    void increase(uint16_t amount) {
+    void increase(const uint16_t amount) {
         value += amount;
         if (value > max) {
             value = max;
@@ -460,7 +456,7 @@ public:
     }
 
     /** Decrease the value by the given amount. */
-    void decrease(uint16_t amount) {
+    void decrease(const uint16_t amount) {
         value -= amount;
         if (value < min) {
             value = min;

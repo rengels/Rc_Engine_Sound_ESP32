@@ -110,6 +110,20 @@ The following table shows a list of the pins and their functionality.
 | 26     | DAC2 | connect pin26 (do not change the pin) to a 10kOhm resistor | |
 
 
+Threads:
+
+| Name | frequency | description | core |
+|------|--------|-------------|------|
+| mapThrottle   | 0.5ms  | maps throttle channel to throttle value and does some volume calculations | 0 |
+| engineMassSimulation   | 2/6ms  | determines RPM and vehicle state | 1 |
+| automaticGearSelector   | 100 ms | set's selectedAutomaticGear | 1 |
+| engineOnOff   | -  | set's engineOn and lightsOn | 1 |
+| led   | -  | output led | 1 |
+| gearboxDetection   | -  | set's selectedGear | 1 |
+| esc   | 20-75 ms (variable) | calculates escPulseWidth, currentSpeed, driveState and more | 1 |
+| variablePlaybackTimer | 10-46us (variable) | outputs sound | 0 |
+| fixedPlaybackTimer | 46us (variable) | outputs sound | 0 |
+
 ## Building block view
 
 ```mermaid

@@ -45,9 +45,9 @@ function headerToArray(headerText) {
  *     repeated (put one after another).
  *  @returns An Int8Array with the wav data.
  */
-function toWav(headerText, repeats=1) {
+function toWav(headerData, repeats=1) {
 
-  const [sampleRate, buffer] = headerToArray(headerText);
+  const [sampleRate, buffer] = headerData;
 
   const bytesNo = 1;  // number of bytes per sample
   const channels = 1;
@@ -122,7 +122,9 @@ function headerFileLoaded(loaded) {
 
   const repeats = document.querySelector('#input_repeats').value;
   const blob = new Blob(
-    [toWav(loaded.target.result, repeats)],
+    [toWav(
+        headerToArray(loaded.target.result),
+        repeats)],
     {type:'audio/wav'});
   const URLObject = window.webkitURL || window.URL;
   const url = URLObject.createObjectURL(blob);

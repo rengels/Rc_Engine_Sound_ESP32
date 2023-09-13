@@ -3,6 +3,7 @@
 
 <head>
 <script src="./samples.js" type="text/javascript"></script>
+<script src="./base64.js" type="text/javascript"></script>
 <script src="./VehicleSimulation.js" type="text/javascript"></script>
 <script src="./d3js.org_d3.v4.js" type="text/javascript"></script>
 <script>
@@ -15,20 +16,23 @@
 var vehicleSimulation = new VehicleSimulation();
 
 // -- the following lists are displayed as values in the graph:
-// list: [attribute name from VehicleSimulation, color name, scale factor, data]
+// list: [attribute name from VehicleSimulation, color name, scale factor, data, dash pattern]
 const displayValues = [
-  ['currentThrottleFaded', 'Navy', 0.2, []],
-  ['selectedAutomaticGear', 'CadetBlue', 25.0, []],
-  ['overdrive', 'Chocolate', 100.0, []],
-  ['engineOn', 'Crimson', 95.0, []],
-  ['engineRunning', 'MediumPurple', 90.0, []],
-  ['driveState', 'Olive', 11.0, []],
-  ['engineState', 'OliveDrab', 10.0, []],
-  ['engineLoad', 'DarkSalmon', 0.2, []],
-  ['currentRpm', 'DarkSlateGrey', 0.2, []],
-  ['currentSpeed', 'DeepPink', 0.2, []],
-  ['escPulseWidth', 'HotPink', 0.05, []]
-]
+  ['currentThrottleFaded', 'Navy', 0.2, [], "1,0"],
+  ['selectedGear', 'Blue', 12.0, [], "10,5"],
+  ['selectedAutomaticGear', 'CadetBlue', 13.0, [], "10,5"],
+  ['clutchDisengaged', 'DarkSlateBlue', 100.0, [], "1,0"],
+  ['overdrive', 'Chocolate', 99.0, [], "1,0"],
+  ['engineOn', 'Crimson', 98.0, [], "1,0"],
+  ['engineRunning', 'MediumPurple', 97.0, [], "1,0"],
+  ['driveState', 'Olive', 11.0, [], "1,0"],
+  ['engineState', 'OliveDrab', 10.0, [], "1,0"],
+  ['engineLoad', 'DarkSalmon', 0.2, [], "1,0"],
+  ['targetRpm', 'DarkGrey', 0.2, [], "5,10"],
+  ['currentRpm', 'DarkSlateGrey', 0.2, [], "5,5"],
+  ['currentSpeed', 'DeepPink', 0.2, [], "1,0"],
+  ['escPulseWidth', 'HotPink', 0.05, [], "1,0"]
+];
 
 // -- the following lists are created as input elements:
 
@@ -39,6 +43,8 @@ const vehicleValues = [
   ['EXCAVATOR_MODE', false, 0, 0],
   ['STEAM_LOCOMOTIVE_MODE', false, 0, 0],
   ['SUPER_SLOW', false, 0, 0],
+
+  ['NumberOfAutomaticGears', 6, 3, 6],
 
   ['startVolumePercentage', 120, 0, 200],
   ['idleVolumePercentage', 72, 0, 200],
@@ -118,7 +124,7 @@ const remoteValues = [
 const transmissionValues = [
   ['OVERDRIVE', false, 0, 0],
   ['VIRTUAL_3_SPEED', false, 0, 0],
-  ['VIRTUAL_16_SPEED_SEQUENTIAL', false, 0, 0],
+  // ['VIRTUAL_16_SPEED_SEQUENTIAL', false, 0, 0], documentation says: don't use
   ['automaticReverseAccelerationPercentage', 100, 0, 200],
   ['lowRangePercentage', 58, 0, 200],
   ['SEMI_AUTOMATIC', false, 0, 0],
@@ -187,190 +193,10 @@ function addInputs(defss, parentElement) {
   }
 }
 
-/** Decodes a .h file and returns a buffer.
- *
- *  @returns An array with sample rate and the buffer data.
- */
-function headerToArray(headerText) {
-
-  const headerLines = headerText.split("\n");
-
-  // -- find the sample rate:
-  const srRe = /samplerate\s*=\s*(\d+)\s*;/i;
-  let sampleRate = 22050;
-  for (let i = 0; i < headerLines.length; i++) {
-    let results = srRe.exec(headerLines[i]);
-    if (results !== null) {
-      sampleRate = parseInt(sampleRate)
-      break;
-    }
-  }
-
-  // -- find the samples (we assume it_s a line with commas
-  let buffer = [];
-  for (let i = 0; i < headerLines.length; i++) {
-    let numbers = headerLines[i].split(",");
-    if (numbers.length > 1) {
-      // ignore everything after the last comma
-      // might be a comment or a closing }
-      for (let j = 0; j < numbers.length - 1; j++) {
-          buffer.push(parseInt(numbers[j]) / 128.0);
-      }
-    }
-  }
-
-  return [sampleRate, buffer];
-}
-
-/** Adds an unsigned 8 bit value to the given byte buffer
- *  at the given position.
- */
-function addInt8(pos, buffer, value) {
-  buffer[pos] = value & 0xff;
-}
-
-
-/** Adds an unsigned 16 bit value to the given byte buffer
- *  at the given position.
- *
- *  It's little endian.
- */
-function addInt16(pos, buffer, value) {
-  addInt8(pos,     buffer, value);
-  addInt8(pos + 1, buffer, value >> 8);
-}
-
-
-/** Adds an unsigned 32 bit value to the given byte buffer
- *  at the given position.
- *
- *  It's little endian.
- */
-function addInt32(pos, buffer, value) {
-  addInt16(pos,     buffer, value);
-  addInt16(pos + 2, buffer, value >> 16);
-}
-
-
-/** Converts the given text (header/include) file to a wav array.
- *
- *  @param repeats: The number of times the audio sample is
- *     repeated (put one after another).
- */
-function toWav(headerText, repeats=1) {
-
-  const [sampleRate, buffer] = headerToArray(headerText);
-
-  const bytesNo = 1;  // number of bytes per sample
-  const channels = 1;
-  const samplesNo = buffer.length * repeats;
-  const fileLength = samplesNo * bytesNo + 44;
-  
-  var buf = new Int8Array(fileLength);
-
-  // -- RIFF section
-  addInt8(0, buf, "R".charCodeAt(0));
-  addInt8(1, buf, "I".charCodeAt(0));
-  addInt8(2, buf, "F".charCodeAt(0));
-  addInt8(3, buf, "F".charCodeAt(0));
-  addInt32(4, buf, fileLength - 8)
-
-  // -- format section
-  addInt8(8,  buf, "W".charCodeAt(0));
-  addInt8(9,  buf, "A".charCodeAt(0));
-  addInt8(10, buf, "V".charCodeAt(0));
-  addInt8(11, buf, "E".charCodeAt(0));
-
-  addInt8(12, buf, "f".charCodeAt(0));
-  addInt8(13, buf, "m".charCodeAt(0));
-  addInt8(14, buf, "t".charCodeAt(0));
-  addInt8(15, buf, " ".charCodeAt(0));
-
-  addInt32(16, buf, 16); // format section length
-  addInt16(20, buf, 1);  // format type (PCM)
-  addInt16(22, buf, channels); // format type (PCM)
-  addInt32(24, buf, sampleRate);
-
-  const bitRate = bytesNo * channels * sampleRate;
-  addInt32(28, buf, bitRate);
-  addInt16(32, buf, bytesNo * channels);
-  addInt16(34, buf, bytesNo * 8);
-  
-  // -- data section
-  addInt8(36, buf, "d".charCodeAt(0));
-  addInt8(37, buf, "a".charCodeAt(0));
-  addInt8(38, buf, "t".charCodeAt(0));
-  addInt8(39, buf, "a".charCodeAt(0));
-
-  const dataSectionLength = bytesNo * samplesNo;
-  addInt32(40, buf, dataSectionLength); // data section length
-  let pos = 44;
-  for (let j = 0; j < repeats; j++) {
-    for (let i = 0; i < buffer.length; i++) {
-      if (bytesNo == 1) {
-        addInt8(pos, buf, Math.round(buffer[i] * (1 << 7) + (1 << 7)));
-        pos++;
-      } else if (bytesNo == 2) {
-        addInt16(pos, buf, Math.round(buffer[i] * (1 << 15)));
-        pos+=2;
-      } else if (bytesNo == 4) {
-        addInt32(pos, buf, Math.round(buffer[i] * (1 << 31)));
-        pos+=4;
-      }
-    }
-  }
-
-  return buf;
-}
-
-
-/** Called when the header file is loaded.
- *
- *  Converts the input file an set's the src of the audio element,
- *  so that it be played back.
- */
-function headerFileLoaded(loaded) {
-
-  const repeats = document.querySelector('#input_repeats').value;
-  const blob = new Blob(
-    [toWav(loaded.target.result, repeats)],
-    {type:'audio/wav'});
-  const URLObject = window.webkitURL || window.URL;
-  const url = URLObject.createObjectURL(blob);
-
-  let audio_source = document.querySelector('#audio_source');
-  audio_source.src = url;
-
-  document.querySelector('#audio_download').href=url;
-
-  let audio_control = document.querySelector('#audio_control');
-  audio_control.pause();
-  audio_control.load();
-  audio_control.oncanplaythrough = audio_control.play();
-}
-
-
-/** Starts downloading and then converting the given file.
- */
-function newFileSelected(event)
-{
-  let fr = new FileReader();
-  // fr.inputFileName = event.target.files[0];
-  fr.onload = headerFileLoaded;  // onload fires after reading is complete
-  fr.readAsText(event.target.files[0]);
-}
-
 
 function updateMassSimulation()
 {
-  vehicleSimulation.step(1000);
-  vehicleSimulation.mapThrottle();
-  vehicleSimulation.engineMassSimulation();
-  // vehicleSimulation.automaticGearSelector();
-  vehicleSimulation.engineOnOff();
-  vehicleSimulation.gearboxDetection();
-  vehicleSimulation.esc();
-  vehicleSimulation.variablePlaybackTimer();
+  vehicleSimulation.step(1); // has to be in sync with timer interval
 }
 
 function addGraph(parentElement)
@@ -410,6 +236,7 @@ function addGraph(parentElement)
     .y(function(d) { return y(d) });
 
   // -- add the line graphs
+  // actually we don't need a loop here. do it d3 style
   for (let i = 0; i < displayValues.length; i++) {
     let values = displayValues[i];
     svg
@@ -419,11 +246,24 @@ function addGraph(parentElement)
       .attr("fill", "none")
       .attr("stroke", values[1])
       .attr("stroke-width", 1.5)
+      .attr("stroke-dasharray", values[4])
       .attr("d", line);
   }
 
   // -- add a legend
-  const size = 10
+  const size = 10;
+  svg.selectAll("legendDots")
+    .data(displayValues)
+    .enter()
+    .append("line") //making a line for legend
+      .attr("x1", 50 - size * 2)
+      .attr("x2", 50)
+      .attr("y1", function(d,i){ return 20 + i*(size+5)}) // 100 is where the first dot appears. 25 is the distance between dots
+      .attr("y2", function(d,i){ return 20 + i*(size+5)}) // 100 is where the first dot appears. 25 is the distance between dots
+      .style("stroke-dasharray", function(d){return d[4]})
+      .style("stroke", function(d){ return d[1]});
+
+                                  /*
   svg.selectAll("legendDots")
     .data(displayValues)
     .enter()
@@ -433,12 +273,13 @@ function addGraph(parentElement)
       .attr("width", size)
       .attr("height", size)
       .style("fill", function(d){ return d[1]})
+                                  */
 
   svg.selectAll("legendLabels")
     .data(displayValues)
     .enter()
     .append("text")
-      .attr("x", 50 + size*1.2)
+      .attr("x", 50 + size*2.2)
       .attr("y", function(d,i){ return 20 + i*(size+5) + (size/2)}) // 100 is where the first dot appears. 25 is the distance between dots
       .style("fill", function(d){ return d[1]})
       .text(function(d){ return d[0]})
@@ -463,6 +304,29 @@ function addGraph(parentElement)
      redraw();
   }, 100);
 }
+
+
+// see
+// https://stackoverflow.com/questions/67342004/how-to-continuously-generate-raw-audio-samples-in-javascript-using-the-web-audio
+
+const blob = new Blob(
+  [`
+    class MyProcessor extends AudioWorkletProcessor {
+      process(_, outputs) {
+        for (const output of outputs) {
+          for (const channelData of output) {
+            for (let i = 0; i < channelData.length; i += 1) {
+                channelData[i] = Math.random() * 2 - 1;
+            }
+          }
+        }
+        return true;
+      }
+    }
+    registerProcessor('my-processor', MyProcessor);
+  `],
+  { type: 'application/javascript' }
+);
 
 </script>
 
@@ -503,7 +367,7 @@ function addGraph(parentElement)
           </table>
         </fieldset>
       </td>
-      <td rowspan="2">
+      <td rowspan="1">
         <fieldset>
           <legend>Values from transmission.h</legend>
           <table id="inputTableTransmission">
@@ -511,18 +375,58 @@ function addGraph(parentElement)
         </fieldset>
       </td>
       <td style="height: 1px;">
-        <label for="inputThrottle">throttle:</label>
-        <input type="range" id="inputThrottle" min="1000" max="2000" value="1500"
-           onchange="vehicleSimulation.pulseWidth = this.value"/>
-        <br/>
-        <label for="inputGear">gear:</label>
-        <input type="range" id="inputGear" min="1" max="16" value="1"
-           onchange="vehicleSimulation.selectedGear = this.value"/>
-        <br/>
+        <fieldset>
+          <legend>Controls</legend>
+        <table>
+          <tr>
+            <td>
+              <label for="inputThrottle">throttle:</label>
+            </td>
+            <td>
+              <input type="range" id="inputThrottle" min="1000" max="2000" value="1500"
+                 onchange="vehicleSimulation.pulseWidth = this.value; vehicleSimulation.updateAudio();"/>
+            </td>
+          </tr>
+          <tr>
+            <td>
+              <label for="inputGear">gear:</label>
+            </td>
+            <td>
+              <input type="range" id="inputGear" min="1" max="6" value="1"
+                 onchange="vehicleSimulation.selectedGear = this.value"/>
+            </td>
+          </tr>
+          <tr>
+            <td>
+              <label>Sounds:</label>
+            </td>
+            <td>
+              <input type="button" id="inputSiren"
+                 onclick="vehicleSimulation.sirenTrigger = true"
+                 value="Siren"/>
+              <input type="button" id="inputHorn"
+                 onclick="vehicleSimulation.hornTrigger = true"
+                 value="Horn"/>
+              <input type="button" id="inputIndicator"
+                 onclick="vehicleSimulation.indicatorSoundOn = true"
+                 value="Indicator"/>
+            </td>
+          </tr>
+          <tr>
+            <td>
+              <label for="inputIndicator">Master volume:</label>
+            </td>
+            <td>
+              <input type="range" id="inputVolume" min="0" max="100" value="100"
+                 onchange="vehicleSimulation.masterVolume = this.value"/>
+            </td>
+          </tr>
+        </table>
+        </fieldset>
       </td>
     </tr>
     <tr>
-      <td>
+      <td colspan="2">
         <div id="graphDiv"></div>
       </td>
     </tr>
@@ -538,7 +442,7 @@ function addGraph(parentElement)
        document.querySelector('#inputTableTransmission'));
     addGraph(
        document.querySelector('#graphDiv'));
-    const massSimulationInterval = setInterval(updateMassSimulation, 100);
+    const massSimulationInterval = setInterval(updateMassSimulation, 1);
   </script>
 </body>
 

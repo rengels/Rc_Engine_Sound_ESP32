@@ -15,7 +15,7 @@ import base64
 #
 # Sorted like this:
 # {'sound1':
-#   {'007JamesBond': [-1, -2, ...],
+#   {'007JamesBond.h': [-1, -2, ...],
 #   }
 # }
 allSamples = {}
@@ -30,7 +30,7 @@ def readInputFile(filename):
     """
     print("Reading " + filename, file=sys.stderr)
 
-    sampleName = pathlib.Path(filename).stem
+    sampleName = pathlib.Path(filename).name
     sampleType = "idle"
     samples = bytes()
     with open(filename, 'r') as file1:
@@ -52,12 +52,10 @@ def readInputFile(filename):
                     samples = samples + bytes(map(lambda x: int(x) + 128, m))
 
     # add it to samples
-    if not sampleType in allSamples:
-        allSamples[sampleType] = {}
-    allSamples[sampleType][sampleName] = base64.b64encode(samples).decode('utf-8')
+    allSamples[sampleName] = base64.b64encode(samples).decode('utf-8')
 
     # add to filename map
-    filenameMap[pathlib.Path(filename).name] = sampleType
+    filenameMap[sampleName] = sampleType
 
 
 for filename in sys.argv[1:]:

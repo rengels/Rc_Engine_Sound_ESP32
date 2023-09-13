@@ -9,8 +9,14 @@
  *  We are assuming that the "sample.js" file was loaded and so
  *  we have the samples available.
  *
+ *  We are also assuming that "base64.js" file was loaded.
+ *  The default base64 js implementation seems to handle
+ *  strings, but not so well binary data.
+ *
  *  @class VehicleSimulation
  */
+"use strict";
+
 class VehicleSimulation {
 
 
@@ -20,6 +26,8 @@ class VehicleSimulation {
   EXCAVATOR_MODE = false;
   STEAM_LOCOMOTIVE_MODE = false;
   SUPER_SLOW = false;
+
+  NumberOfAutomaticGears = 6;
 
   startVolumePercentage = 120;
   idleVolumePercentage = 72;
@@ -268,7 +276,33 @@ class VehicleSimulation {
 
   // -- defined in curves.h
   torqueconverterSlipPercentage = 100;
-  gearRatio = [10, 37, 29, 22, 17, 13, 10]; // todo: there is more than only this.
+
+  get gearRatio() {
+    if (this.NumberOfAutomaticGears == 6) {
+      if (!this.OVERDRIVE) {
+        return [10, 37, 29, 22, 17, 13, 10]; // x1.30 (Allison 3200 EVS (10, 54, 26, 22, 15, 12, 10) has too much spread)
+      } else {
+        return [10, 33, 25, 19, 14, 11, 8]; // Overdrive (lower RPM) in top gear. x1.33. OK, but fast shifting
+      }
+    } else if (this.NumberOfAutomaticGears == 4) {
+      if (!this.OVERDRIVE) {
+        return [10, 43, 23, 14, 10]; // GM Turbo HydraMatic 700-R4
+      } else {
+        return [10, 30, 16, 10, 7]; // Overdrive (lower RPM) in 4th gear
+      }
+    } else {
+      return [10, 25, 15, 10]; // GM Turbo HydraMatic 400
+    }
+  }
+
+  get virtualManualGearRatio() {
+    if (this.VIRTUAL_3_SPEED) {
+      return [10, 23, 14, 10, 8]; // unused, 1st, 2nd, 3rd, (4rd overdrive) gear 23, 14, 10, 8
+    } else {
+      return [10, 77, 64, 53, 44, 37, 31, 26, 21, 18, 15, 12, 10, 8, 7, 6, 5]; // unused, 1st, 2nd etc.
+    }
+  }
+
   curveLinear = [
     [0, 0] // {input value, output value}
     , [83, 200]
@@ -347,9 +381,48 @@ class VehicleSimulation {
   attenuator = 0;               // Used for volume adjustment during engine switch off
   speedPercentage = 0;          // slows the engine down during shutdown
 
+  // -- static variables from fixedPlaybackTimer
+  curHornSample = 0;                            // Index of currently loaded horn sample
+  curSirenSample = 0;                           // Index of currently loaded siren sample
+  curSound1Sample = 0;                          // Index of currently loaded sound1 sample
+  curReversingSample = 0;                       // Index of currently loaded reversing beep sample
+  curIndicatorSample = 0;                       // Index of currently loaded indicator tick sample
+  curWastegateSample = 0;                       // Index of currently loaded wastegate sample
+  curBrakeSample = 0;                           // Index of currently loaded brake sound sample
+  curParkingBrakeSample = 0;                    // Index of currently loaded brake sound sample
+  curShiftingSample = 0;                        // Index of currently loaded shifting sample
+  curDieselKnockSample = 0;                     // Index of currently loaded Diesel knock sample
+  curCouplingSample = 0;                        // Index of currently loaded trailer coupling sample
+  curUncouplingSample = 0;                      // Index of currently loaded trailer uncoupling sample
+  curHydraulicFlowSample = 0;                   // Index of currently loaded hydraulic flow sample
+  curTrackRattleSample = 0;                     // Index of currently loaded track rattle sample
+  curBucketRattleSample = 0;                    // Index of currently loaded bucket rattle sample
+  curTireSquealSample = 0;                      // Index of currently loaded tire squeal sample
+  curOutOfFuelSample = 0;                       // Index of currently loaded out of fuel sample
+  knockSilent = false;                          // This knock will be more silent
+  knockMedium = false;                          // This knock will be medium
+  curKnockCylinder = 0;                         // Index of currently ignited zylinder
+
+  // -- static variables from automaticGearSelector
+  gearSelectorMillis = 0;
+  lastUpShiftingMillis = 0;
+  lastDownShiftingMillis = 0;
+  _currentRpm2 = 0; // Private current RPM (to prevent conflict with core 1)
 
   currentMillis = 0;
 
+  /** State if the audio (and audio context) has been initialized.
+   *
+   *  We delay this until after an user action to not trigger
+   *  warnings in chrome.
+   */
+  audioInitialized = false;
+
+  /** List with all the sample names.
+   *
+   *  "idle" is a special case, since the the idle sample is just
+   *  called "samples"
+   */
   sampleList = [
       'start',
       'rev',
@@ -359,25 +432,232 @@ class VehicleSimulation {
       'charger',
       'hydraulicPump',
       'trackRattle',
+      'horn',
+      'siren',
+      'sound1',
+      'reversing',
+      'indicator',
+      'wastegate',
+      'brake',
+      'parkingBrake',
+      'shifting',
+      'knock',
+      'coupling',
+      'uncoupling',
+      'hydraulicFlow',
+      'trackRattle',
+      'bucketRattle',
+      'tireSqueal',
+      'outOfFuel',
   ];
+
+  /** List with samples that are looping.
+   */
+  sampleLoop = {
+      'rev': true,
+      'turbo': true,
+      'fan': true,
+      'trackRattle': true,
+  }
 
   /** Creates the object.
    *
    *  Creates the samples from a list.
    */
   constructor() {
-
       this["samples"] = new Int8Array();
       this["sampleCount"] = 0;
       for (let i = 0; i < this.sampleList.length; i++) {
-          const sampleName = this.sampleList[i];
-          this[sampleName + "Samples"] = new Int8Array();
-          this[sampleName + "SampleCount"] = 0;
+          const sampleType = this.sampleList[i];
+          this[sampleType + "Samples"] = new Int8Array();
+          this[sampleType + "SampleCount"] = 0;
       }
   }
 
+  /** Uses the data from the cur..Sample to update
+   *  the web audio samples.
+   */
+  updateAudio() {
+      if (!this.audioInitialized) {
+          this.audioInitialized = true;
+
+          this.audioCtx = new AudioContext();
+          this.loadSample("1965FordMustangV8start.h")
+          this.loadSample("AdlerIdle.h")
+          this.loadSample("AdlerRev.h")
+          this.loadSample("JakeBrake.h")
+          this.loadSample("DefenderTd5knock.h")
+          this.loadSample("TurboWhistle.h")
+          this.loadSample("DefenderTd5wastegate.h")
+          this.loadSample("Tatra813FanNew.h")
+          this.loadSample("AdlerWhistle2.h")
+          this.loadSample("TruckAirBrakesLong.h")
+          this.loadSample("ParkingBrake.h")
+          this.loadSample("AirShifting.h")
+          this.loadSample("door.h")
+          this.loadSample("Indicator.h")
+          this.loadSample("TrackRattle2.h")
+          this.loadSample("coupling.h")
+          this.loadSample("uncoupling.h")
+          this.loadSample("TruckReversingBeep.h")
+      }
+
+      // todo: restarting doesn't work
+      if (this.curStartSample > 0) {
+          this.startSource.start();
+      }
+      if (this.curHornSample > 0) {
+          this.hornSource.start();
+      }
+  }
+
+
+  /** Converts the given text (header/include) file to a wav array.
+   *
+   *  @param repeats: The number of times the audio sample is
+   *     repeated (put one after another).
+   *  @returns An Int8Array with the wav data.
+   */
+  toWav(buffer, sampleRate) {
+
+    const bytesNo = 1;  // number of bytes per sample
+    const channels = 1;
+    const samplesNo = buffer.length;
+    const fileLength = samplesNo * bytesNo + 44;
+    
+    const buf = new ArrayBuffer(fileLength);
+    const view = new DataView(buf, 0)
+
+    // -- RIFF section
+    view.setUint8(0, "R".charCodeAt(0));
+    view.setUint8(1, "I".charCodeAt(0));
+    view.setUint8(2, "F".charCodeAt(0));
+    view.setUint8(3, "F".charCodeAt(0));
+    view.setUint32(4, fileLength - 8, true)
+
+    // -- format section
+    view.setUint8(8, "W".charCodeAt(0));
+    view.setUint8(9, "A".charCodeAt(0));
+    view.setUint8(10, "V".charCodeAt(0));
+    view.setUint8(11, "E".charCodeAt(0));
+
+    view.setUint8(12, "f".charCodeAt(0));
+    view.setUint8(13, "m".charCodeAt(0));
+    view.setUint8(14, "t".charCodeAt(0));
+    view.setUint8(15, " ".charCodeAt(0));
+
+    view.setUint32(16, 16, true); // format section length
+    view.setUint16(20, 1, true);  // format type (PCM)
+    view.setUint16(22, channels, true); // format type (PCM)
+    view.setUint32(24, sampleRate, true);
+
+    const bitRate = bytesNo * channels * sampleRate;
+    view.setUint32(28, bitRate, true);
+    view.setUint16(32, bytesNo * channels, true);
+    view.setUint16(34, bytesNo * 8, true);
+    
+    // -- data section
+    view.setUint8(36, "d".charCodeAt(0));
+    view.setUint8(37, "a".charCodeAt(0));
+    view.setUint8(38, "t".charCodeAt(0));
+    view.setUint8(39, "a".charCodeAt(0));
+
+    const dataSectionLength = bytesNo * samplesNo;
+    view.setUint32(40, dataSectionLength, true); // data section length
+    let pos = 44;
+    for (let i = 0; i < buffer.length; i++) {
+      if (bytesNo == 1) {
+        view.setUint8(pos, Math.round(buffer[i] * (1 << 7) + (1 << 7)));
+        pos++;
+      } else if (bytesNo == 2) {
+        view.setUint16(pos, Math.round(buffer[i] * (1 << 15)), true);
+        pos+=2;
+      } else if (bytesNo == 4) {
+        view.setUint32(pos, Math.round(buffer[i] * (1 << 31)), true);
+        pos+=4;
+      }
+    }
+
+    return buf;
+  }
+
+  /** Loads the sample from the samples.js provided structures.
+   *
+   *  Set's the correct attributes, e.g. 'turboSamples'.
+   */
+  loadSample(filename) {
+      const sampleRate = 220500;
+
+      function capitalizeFirstLetter(string) {
+        return string.charAt(0).toUpperCase() + string.slice(1);
+      }
+
+      if (filenameSamplesMap && filename in filenameSamplesMap) {
+        const sampleType = filenameSamplesMap[filename];
+        const binaryString = atob(allSamples[filename]);
+        const bytes = new Uint8Array(binaryString.length);
+        if (sampleType == "idle") {
+          this.samples = bytes;
+          this.sampleCount = bytes.length;
+        } else {
+          this[sampleType + "Samples"] = bytes;
+          this[sampleType + "SampleCount"] = bytes.length;
+        }
+
+        let source = this.audioCtx.createBufferSource();
+        this.audioCtx.decodeAudioData(
+          this.toWav(bytes, sampleRate),
+          (buf) => {
+            source.buffer = buf;
+          },
+          (err) => {
+            console.error(
+              `Unable to get the audio file: ${name} Error: ${err.message}`,
+            );
+          },
+        );
+        // source.buffer = buffer;
+        source.playbackRate.value = sampleRate;
+        source.connect(this.audioCtx.destination);
+        if (sampleType in this.sampleLoop) {
+           source.loop = true;
+        }
+
+        // when the sound has ended, update the
+        // e.g. curStartSample to a big value
+        source.onended = () => {
+            this["cur" + capitalizeFirstLetter(sampleType) + "Sample"] = 99999;
+        };
+
+        // stop the old node
+        if (this[sampleType + "Source"]) {
+            this[sampleType + "Source"].disconnect()
+        }
+        this[sampleType + "Source"] = source;
+      }
+  }
+
+  /** Triggers the different state functions of
+   *  the original src.ino
+   */
   step(millis) {
     this.currentMillis += millis;
+
+    this.mapThrottle();
+    this.engineMassSimulation();
+    this.engineOnOff();
+    this.gearboxDetection();
+    this.esc();
+    this.variablePlaybackTimer();
+    this.fixedPlaybackTimer();
+
+    if (this.automatic || this.doubleClutch) {
+      this.automaticGearSelector();
+    }
+
+    if (this.audioInitialized) {
+      this.updateAudio();
+    }
   }
 
   millis() {
@@ -446,7 +726,7 @@ class VehicleSimulation {
       if (!this.escIsBraking && this.escIsDriving && this.shiftingAutoThrottle && !this.automatic && !this.doubleClutch)
       {
         if (this.gearUpShiftingInProgress && !this.doubleClutchInProgress)
-          currentThrottle = 0; // No throttle
+          this.currentThrottle = 0; // No throttle
         if (this.gearDownShiftingInProgress || this.doubleClutchInProgress)
           this.currentThrottle = 500;                              // Full throttle
         this.currentThrottle = this.constrain(this.currentThrottle, 0, 500); // Limit throttle range
@@ -650,7 +930,7 @@ class VehicleSimulation {
           {  // Clutch engaged: Engine rpm synchronized with ESC power (speed)
 
             if (this.VIRTUAL_3_SPEED || this.VIRTUAL_16_SPEED_SEQUENTIAL) { // Virtual 3 speed or sequential 16 speed transmission
-              this.targetRpm = this.reMap(this.curveLinear, (this.currentSpeed * virtualManualGearRatio[this.selectedGear] / 10)); // Add virtual gear ratios
+              this.targetRpm = this.reMap(this.curveLinear, (this.currentSpeed * this.virtualManualGearRatio[this.selectedGear] / 10)); // Add virtual gear ratios
               if (this.targetRpm > 500)
                 this.targetRpm = 500;
 
@@ -693,10 +973,10 @@ class VehicleSimulation {
           this._currentRpm = this.minRpm;
       }
 
-      if ((this.VIRTUAL_3_SPEED || this.VIRTUAL_16_SPEED_SEQUENTIAL) && !STEAM_LOCOMOTIVE_MODE) {
+      if ((this.VIRTUAL_3_SPEED || this.VIRTUAL_16_SPEED_SEQUENTIAL) && !this.STEAM_LOCOMOTIVE_MODE) {
         // Limit top speed, depending on manual gear ratio. Ensures, that the engine will not blow up!
         if (!this.automatic && !this.doubleClutch)
-          this.speedLimit = this.maxRpm * 10 / virtualManualGearRatio[this.selectedGear];
+          this.speedLimit = this.maxRpm * 10 / this.virtualManualGearRatio[this.selectedGear];
       }
 
       // Speed (sample rate) output
@@ -844,13 +1124,13 @@ class VehicleSimulation {
       let upshiftingDuration = 700;
       if (!this.gearUpShiftingInProgress)
         this.upShiftingMillis = this.millis();
-      if (this.millis() - this.upShiftingMillis > this.upshiftingDuration)
+      if (this.millis() - this.upShiftingMillis > upshiftingDuration)
       {
         this.gearUpShiftingInProgress = false;
       }
       // Double-clutch (Zwischengas während dem Hochschalten)
       if (this.DOUBLE_CLUTCH) {
-        this.upshiftingDuration = 900;
+        upshiftingDuration = 900;
         this.doubleClutchInProgress = (this.millis() - this.upShiftingMillis >= 500 && this.millis() - this.upShiftingMillis < 600); // Apply full throttle
       }
 
@@ -1354,391 +1634,355 @@ class VehicleSimulation {
     let value = this.constrain(soundVal * this.masterVolume / 100 + this.dacOffset, 0, 255);
   }
 
-  void IRAM_ATTR fixedPlaybackTimer()
+
+  // --- fixed playback
+
+  fixedPlaybackTimer()
   {
-
-    // coreId = xPortGetCoreID(); // Running on core 1
-
-    static uint32_t curHornSample = 0;                            // Index of currently loaded horn sample
-    static uint32_t curSirenSample = 0;                           // Index of currently loaded siren sample
-    static uint32_t curSound1Sample = 0;                          // Index of currently loaded sound1 sample
-    static uint32_t curReversingSample = 0;                       // Index of currently loaded reversing beep sample
-    static uint32_t curIndicatorSample = 0;                       // Index of currently loaded indicator tick sample
-    static uint32_t curWastegateSample = 0;                       // Index of currently loaded wastegate sample
-    static uint32_t curBrakeSample = 0;                           // Index of currently loaded brake sound sample
-    static uint32_t curParkingBrakeSample = 0;                    // Index of currently loaded brake sound sample
-    static uint32_t curShiftingSample = 0;                        // Index of currently loaded shifting sample
-    static uint32_t curDieselKnockSample = 0;                     // Index of currently loaded Diesel knock sample
-    static uint32_t curCouplingSample = 0;                        // Index of currently loaded trailer coupling sample
-    static uint32_t curUncouplingSample = 0;                      // Index of currently loaded trailer uncoupling sample
-    static uint32_t curHydraulicFlowSample = 0;                   // Index of currently loaded hydraulic flow sample
-    static uint32_t curTrackRattleSample = 0;                     // Index of currently loaded track rattle sample
-    static uint32_t curBucketRattleSample = 0;                    // Index of currently loaded bucket rattle sample
-    static uint32_t curTireSquealSample = 0;                      // Index of currently loaded tire squeal sample
-    static uint32_t curOutOfFuelSample = 0;                       // Index of currently loaded out of fuel sample
-    static boolean knockSilent = 0;                               // This knock will be more silent
-    static boolean knockMedium = 0;                               // This knock will be medium
-    static uint8_t curKnockCylinder = 0;                          // Index of currently ignited zylinder
-
-    // portENTER_CRITICAL_ISR(&fixedTimerMux);
-
-    int32_t soundVal = 0;
+    let soundVal = 0;
 
     // horn *************************************************
-    if (curHornSample >= hornSampleCount)
+    if (this.curHornSample >= this.hornSampleCount)
     { // End of sample
-      curHornSample = 0;
-      hornLatch = false;
+      this.curHornSample = 0;
+      this.hornLatch = false;
     }
-    if (hornTrigger || hornLatch)
+    if (this.hornTrigger || this.hornLatch)
     {
-      soundVal += (hornSamples[curHornSample] * hornVolumePercentage / 100);
-      curHornSample++;
-  #ifdef HORN_LOOP // Optional "endless loop" (points to be defined manually in horn file)
-        if (hornTrigger && curHornSample == hornLoopEnd)
-          curHornSample = hornLoopBegin; // Loop, if trigger still present
-  #endif
+      soundVal += (this.hornSamples[this.curHornSample] * this.hornVolumePercentage / 100);
+      this.curHornSample++;
+      if (this.hornTrigger && this.curHornSample == this.hornLoopEnd)
+        this.curHornSample = this.hornLoopBegin; // Loop, if trigger still present
     }
 
     // siren *************************************************
-    if (curSirenSample >= sirenSampleCount)
+    if (this.curSirenSample >= this.sirenSampleCount)
     { // End of sample
-      curSirenSample = 0;
-      sirenLatch = false;
+      this.curSirenSample = 0;
+      this.sirenLatch = false;
     }
-    if (sirenTrigger || sirenLatch)
+    if (this.sirenTrigger || this.sirenLatch)
     {
-  #if defined SIREN_STOP
-      if (!sirenTrigger)
+      if (!this.sirenTrigger)
       {
-        curSirenSample = 0;
-        sirenLatch = false;
+        this.curSirenSample = 0;
+        this.sirenLatch = false;
       }
-  #endif
 
-      soundVal += (sirenSamples[curSirenSample] * sirenVolumePercentage / 100);
-      curSirenSample++;
-  #ifdef SIREN_LOOP // Optional "endless loop" (points to be defined manually in siren file)
-      if (sirenTrigger && curSirenSample == sirenLoopEnd)
-        curSirenSample = sirenLoopBegin; // Loop, if trigger still present
-  #endif
+      soundVal += (this.sirenSamples[this.curSirenSample] * this.sirenVolumePercentage / 100);
+      this.curSirenSample++;
+      if (this.sirenTrigger && this.curSirenSample == this.sirenLoopEnd)
+        this.curSirenSample = this.sirenLoopBegin; // Loop, if trigger still present
     }
-    if (curSirenSample > 10 && curSirenSample < 500)
-      cannonFlash = true; // Tank cannon flash triggering in TRACKED_MODE
+    if (this.curSirenSample > 10 && this.curSirenSample < 500)
+      this.cannonFlash = true; // Tank cannon flash triggering in TRACKED_MODE
     else
-      cannonFlash = false;
+      this.cannonFlash = false;
 
     // other sounds *********************************************
 
-    if (curSound1Sample < sound1SampleCount)
+    if (this.sound1trigger)
     {
-      curSound1Sample = 0; // ensure, next sound will start @ first sample
-    }
-    if (sound1trigger)
-    {
-      soundVal += (sound1Samples[curSound1Sample] * sound1VolumePercentage / 100);
-      curSound1Sample++;
-      if (curSound1Sample >= sound1SampleCount)
+      soundVal += (this.sound1Samples[curSound1Sample] * this.sound1VolumePercentage / 100);
+      this.curSound1Sample++;
+      if (this.curSound1Sample >= this.sound1SampleCount)
       {
-        sound1trigger = false;
-        curSound1Sample = 0; // ensure, next sound will start @ first sample
+        this.sound1trigger = false;
+        this.curSound1Sample = 0; // ensure, next sound will start @ first sample
       }
     }
 
     // Reversing beep sound "b1" ----
-    if (curReversingSample >= reversingSampleCount)
+    if (this.curReversingSample >= this.reversingSampleCount)
     {
-      curReversingSample = 0;
+      this.curReversingSample = 0;
     }
-    if (engineRunning && escInReverse)
+    if (this.engineRunning && this.escInReverse)
     {
-      soundVal += (reversingSamples[curReversingSample] * reversingVolumePercentage / 100);
-      curReversingSample++;
+      soundVal += (this.reversingSamples[this.curReversingSample] * this.reversingVolumePercentage / 100);
+      this.curReversingSample++;
     }
     else
     {
-      curReversingSample = 0; // ensure, next sound will start @ first sample
+      this.curReversingSample = 0; // ensure, next sound will start @ first sample
     }
 
     // Indicator tick sound ------------------------------------------
-  #if not defined NO_INDICATOR_SOUND
-    if (curIndicatorSample >= indicatorSampleCount)
+    if (this.indicatorSoundOn)
     {
-      curIndicatorSample = 0;
-    }
-    if (indicatorSoundOn)
-    {
-      soundVal += (indicatorSamples[curIndicatorSample] * indicatorVolumePercentage / 100);
-      curIndicatorSample++;
-      if (curIndicatorSample >= indicatorSampleCount)
+      soundVal += (this.indicatorSamples[this.curIndicatorSample] * this.indicatorVolumePercentage / 100);
+      this.curIndicatorSample++;
+      if (this.curIndicatorSample >= this.indicatorSampleCount)
       {
-        indicatorSoundOn = false;
-        curIndicatorSample = 0; // ensure, next sound will start @ first sample
+        this.indicatorSoundOn = false;
+        this.curIndicatorSample = 0; // ensure, next sound will start @ first sample
       }
     }
-  #endif
 
     // Wastegate (blowoff) sound, triggered after rapid throttle drop -----------------------------------
-    if (curWastegateSample >= wastegateSampleCount)
+    if (this.wastegateTrigger)
     {
-      curWastegateSample = 0;
-    }
-    if (wastegateTrigger)
-    {
-      soundVal += (wastegateSamples[curWastegateSample] * rpmDependentWastegateVolume / 100 * wastegateVolumePercentage / 100);
-      curWastegateSample++;
-      if (curWastegateSample >= wastegateSampleCount)
+      soundVal += (this.wastegateSamples[this.curWastegateSample] * this.rpmDependentWastegateVolume / 100 * this.wastegateVolumePercentage / 100);
+      this.curWastegateSample++;
+      if (this.curWastegateSample >= this.wastegateSampleCount)
       {
-        wastegateTrigger = false;
-        curWastegateSample = 0; // ensure, next sound will start @ first sample
+        this.wastegateTrigger = false;
+        this.curWastegateSample = 0; // ensure, next sound will start @ first sample
       }
     }
 
     // Air brake release sound, triggered after stop -----------------------------------------------
-    if (curBrakeSample >= brakeSampleCount)
+    if (this.airBrakeTrigger)
     {
-      curBrakeSample = 0;
-    }
-    if (airBrakeTrigger)
-    {
-      soundVal += (brakeSamples[curBrakeSample] * brakeVolumePercentage / 100);
-      curBrakeSample++;
-      if (curBrakeSample >= brakeSampleCount)
+      soundVal += (this.brakeSamples[this.curBrakeSample] * this.brakeVolumePercentage / 100);
+      this.curBrakeSample++;
+      if (this.curBrakeSample >= this.brakeSampleCount)
       {
-        airBrakeTrigger = false;
-        curBrakeSample = 0; // ensure, next sound will start @ first sample
+        this.airBrakeTrigger = false;
+        this.curBrakeSample = 0; // ensure, next sound will start @ first sample
       }
     }
 
     // Air parking brake attaching sound, triggered after engine off --------------------------------
-    if (curParkingBrakeSample >= parkingBrakeSampleCount)
+    if (this.parkingBrakeTrigger)
     {
-      curParkingBrakeSample = 0;
-    }
-    if (parkingBrakeTrigger)
-    {
-      soundVal += (parkingBrakeSamples[curParkingBrakeSample] * parkingBrakeVolumePercentage / 100);
-      curParkingBrakeSample++;
-      if (curParkingBrakeSample >= parkingBrakeSampleCount)
+      soundVal += (this.parkingBrakeSamples[this.curParkingBrakeSample] * this.parkingBrakeVolumePercentage / 100);
+      this.curParkingBrakeSample++;
+      if (this.curParkingBrakeSample >= this.parkingBrakeSampleCount)
       {
-        parkingBrakeTrigger = false;
-        curParkingBrakeSample = 0; // ensure, next sound will start @ first sample
+        this.parkingBrakeTrigger = false;
+        this.curParkingBrakeSample = 0; // ensure, next sound will start @ first sample
       }
     }
 
     // Pneumatic gear shifting sound, triggered while shifting the TAMIYA 3 speed transmission ------
-    if (curShiftingSample >= shiftingSampleCount)
+    if (this.shiftingTrigger && this.engineRunning && !this.automatic && !this.doubleClutch)
     {
-      curShiftingSample = 0;
-    }
-    if (shiftingTrigger && engineRunning && !automatic && !doubleClutch)
-    {
-      soundVal = (shiftingSamples[curShiftingSample] * shiftingVolumePercentage / 100);
-      curShiftingSample++;
-      if (curShiftingSample >= shiftingSampleCount)
+      soundVal = (this.shiftingSamples[this.curShiftingSample] * this.shiftingVolumePercentage / 100);
+      this.curShiftingSample++;
+      if (this.curShiftingSample >= this.shiftingSampleCount)
       {
-        shiftingTrigger = false;
-        curShiftingSample = 0; // ensure, next sound will start @ first sample
+        this.shiftingTrigger = false;
+        this.curShiftingSample = 0; // ensure, next sound will start @ first sample
       }
     }
 
     // Diesel ignition "knock" is played in fixed sample rate section, because we don't want changing pitch! ------
-    if (dieselKnockTriggerFirst)
+    if (this.dieselKnockTriggerFirst)
     {
-      dieselKnockTriggerFirst = false;
-      curKnockCylinder = 0;
+      this.dieselKnockTriggerFirst = false;
+      this.curKnockCylinder = 0;
     }
 
-    if (dieselKnockTrigger)
+    if (this.dieselKnockTrigger)
     {
-      dieselKnockTrigger = false;
-      curKnockCylinder++; // Count ignition sequence
-      curDieselKnockSample = 0;
+      this.dieselKnockTrigger = false;
+      this.curKnockCylinder++; // Count ignition sequence
+      this.curDieselKnockSample = 0;
     }
 
-  #ifdef V8 // (former ADAPTIVE_KNOCK_VOLUME, rename it in your config file!)
-    // Ford or Scania V8 ignition sequence: 1 - 5 - 4 - 2* - 6 - 3 - 7 - 8* (* = louder knock pulses, because 2nd exhaust in same manifold after 90°)
-    if (curKnockCylinder == 4 || curKnockCylinder == 8)
-      knockSilent = false;
-    else
-      knockSilent = true;
-  #endif
+    if (this.V8) { // (former ADAPTIVE_KNOCK_VOLUME, rename it in your config file!)
+      // Ford or Scania V8 ignition sequence: 1 - 5 - 4 - 2* - 6 - 3 - 7 - 8* (* = louder knock pulses, because 2nd exhaust in same manifold after 90°)
+      if (this.curKnockCylinder == 4 || this.curKnockCylinder == 8)
+        this.knockSilent = false;
+      else
+        this.knockSilent = true;
+    }
 
-  #ifdef V8_MEDIUM // (former ADAPTIVE_KNOCK_VOLUME, rename it in your config file!)
-    // This is EXPERIMENTAL!! TODO
-    if (curKnockCylinder == 5 || curKnockCylinder == 1)
-      knockMedium = false;
-    else
-      knockMedium = true;
-  #endif
+    if (this.V8_MEDIUM) { // (former ADAPTIVE_KNOCK_VOLUME, rename it in your config file!)
+      // This is EXPERIMENTAL!! TODO
+      if (this.curKnockCylinder == 5 || this.curKnockCylinder == 1)
+        this.knockMedium = false;
+      else
+        this.knockMedium = true;
+    }
 
-  #ifdef V8_468 // (Chevy 468, containing 16 ignition pulses)
-    // 1th, 5th, 9th and 13th are the loudest
-    // Ignition sequence: 1 - 8 - 4* - 3 - 6 - 5 - 7* - 2
-    if (curKnockCylinder == 1 || curKnockCylinder == 5 || curKnockCylinder == 9 || curKnockCylinder == 13)
-      knockSilent = false;
-    else
-      knockSilent = true;
-  #endif
+    if (this.V8_468) { // (Chevy 468, containing 16 ignition pulses)
+      // 1th, 5th, 9th and 13th are the loudest
+      // Ignition sequence: 1 - 8 - 4* - 3 - 6 - 5 - 7* - 2
+      if (this.curKnockCylinder == 1 || this.curKnockCylinder == 5 || this.curKnockCylinder == 9 || this.curKnockCylinder == 13)
+        this.knockSilent = false;
+      else
+        this.knockSilent = true;
+    }
 
-  #ifdef V2
-    // V2 engine: 1st and 2nd knock pulses (of 4) will be louder
-    if (curKnockCylinder == 1 || curKnockCylinder == 2)
-      knockSilent = false;
-    else
-      knockSilent = true;
-  #endif
+    if (this.V2) {
+      // V2 engine: 1st and 2nd knock pulses (of 4) will be louder
+      if (this.curKnockCylinder == 1 || this.curKnockCylinder == 2)
+        this.knockSilent = false;
+      else
+        this.knockSilent = true;
+    }
 
-  #ifdef R6
-    // R6 inline 6 engine: 6th knock pulse (of 6) will be louder
-    if (curKnockCylinder == 6)
-      knockSilent = false;
-    else
-      knockSilent = true;
-  #endif
+    if (this.R6) {
+      // R6 inline 6 engine: 6th knock pulse (of 6) will be louder
+      if (this.curKnockCylinder == 6)
+        this.knockSilent = false;
+      else
+        this.knockSilent = true;
+    }
 
-  #ifdef R6_2
-    // R6 inline 6 engine: 6th and 3rd knock pulse (of 6) will be louder
-    if (curKnockCylinder == 6 || curKnockCylinder == 3)
-      knockSilent = false;
-    else
-      knockSilent = true;
-  #endif
+    if (this.R6_2) {
+      // R6 inline 6 engine: 6th and 3rd knock pulse (of 6) will be louder
+      if (this.curKnockCylinder == 6 || this.curKnockCylinder == 3)
+        this.knockSilent = false;
+      else
+        this.knockSilent = true;
+    }
 
-    if (curDieselKnockSample < knockSampleCount)
+    if (this.curDieselKnockSample < this.knockSampleCount)
     {
       // multiplier for volume (we divide by 100 at the end)
-      int32_t dieselVolume = dieselKnockVolumePercentage;
-      dieselVolume *= throttleDependentKnockVolume;
+      let dieselVolume = this.dieselKnockVolumePercentage;
+      dieselVolume *= this.throttleDependentKnockVolume;
 
-  #if defined RPM_DEPENDENT_KNOCK // knock volume also depending on engine rpm
-      dieselVolume *= rpmDependentKnockVolume;
-  #elif defined EXCAVATOR_MODE // knock volume also depending on hydraulic load
-      dieselVolume *= hydraulicDependentKnockVolume;
-  #else
-      dieselVolume *= 100;
-  #endif
+      if (this.RPM_DEPENDENT_KNOCK) { // knock volume also depending on engine rpm
+          dieselVolume *= this.rpmDependentKnockVolume;
+      } else if (this.EXCAVATOR_MODE) { // knock volume also depending on hydraulic load
+          dieselVolume *= this.hydraulicDependentKnockVolume;
+      } else {
+          dieselVolume *= 100;
+      }
 
       // changing knock volume according to engine type and cylinder!
-      if (knockSilent && !knockMedium)
-        dieselVolume *= dieselKnockAdaptiveVolumePercentage / 100;
-      if (knockMedium)
-        dieselVolume *= dieselKnockAdaptiveVolumePercentage / 75;
+      if (this.knockSilent && !this.knockMedium)
+        dieselVolume *= this.dieselKnockAdaptiveVolumePercentage / 100;
+      if (this.knockMedium)
+        dieselVolume *= this.dieselKnockAdaptiveVolumePercentage / 75;
 
-      soundVal += knockSamples[curDieselKnockSample] *
+      soundVal += this.knockSamples[this.curDieselKnockSample] *
           dieselVolume / (100 * 100);
-      curDieselKnockSample++;
+      this.curDieselKnockSample++;
     }
 
-  #if not defined EXCAVATOR_MODE
-    // Trailer coupling sound, triggered by switch -----------------------------------------------
-  #ifdef COUPLING_SOUND
-    if (curCouplingSample >= couplingSampleCount)
-    {
-      curCouplingSample = 0;
-    }
-    if (couplingTrigger)
-    {
-      soundVal += (couplingSamples[curCouplingSample] * couplingVolumePercentage / 100);
-      curCouplingSample++;
-      if (curCouplingSample >= couplingSampleCount)
+      if (!this.EXCAVATOR_MODE) {
+        // Trailer coupling sound, triggered by switch -----------------------------------------------
+          if (this.couplingTrigger)
+          {
+            soundVal += (this.couplingSamples[this.curCouplingSample] * this.couplingVolumePercentage / 100);
+            this.curCouplingSample++;
+            if (this.curCouplingSample >= this.couplingSampleCount)
+            {
+              this.couplingTrigger = false;
+              this.curCouplingSample = 0; // ensure, next sound will start @ first sample
+            }
+          }
+
+          // Trailer uncoupling sound, triggered by switch -----------------------------------------------
+          if (this.uncouplingTrigger)
+          {
+            soundVal += (this.uncouplingSamples[this.curUncouplingSample] * this.couplingVolumePercentage / 100);
+            this.curUncouplingSample++;
+            if (this.curUncouplingSample >= this.uncouplingSampleCount)
+            {
+              this.uncouplingTrigger = false;
+              this.curUncouplingSample = 0;
+            }
+          }
+    } else {
+
+      // excavator sounds **************************************************
+
+      // Hydraulic fluid flow sound -----------------------
+      if (this.curHydraulicFlowSample >= this.hydraulicFlowSampleCount)
       {
-        couplingTrigger = false;
-        curCouplingSample = 0; // ensure, next sound will start @ first sample
+        this.curHydraulicFlowSample = 0;
+      }
+      soundVal += (this.hydraulicFlowSamples[this.curHydraulicFlowSample] * this.hydraulicFlowVolumePercentage / 100 * this.hydraulicFlowVolume / 100);
+      this.curHydraulicFlowSample++;
+
+      // Track rattle sound -----------------------
+      if (this.curTrackRattleSample >= this.trackRattleSampleCount)
+      {
+        this.curTrackRattleSample = 0;
+      }
+      soundVal += (this.trackRattleSamples[this.curTrackRattleSample] * this.trackRattleVolumePercentage / 100 * this.trackRattleVolume / 100);
+      this.curTrackRattleSample++;
+
+      // Bucket rattle sound -----------------------
+      if (this.bucketRattleTrigger)
+      {
+        soundVal += (this.bucketRattleSamples[this.curBucketRattleSample] * this.bucketRattleVolumePercentage / 100);
+        this.curBucketRattleSample++;
+        if (this.curBucketRattleSample >= this.bucketRattleSampleCount)
+        {
+          this.bucketRattleTrigger = false;
+          this.curBucketRattleSample = 0; // ensure, next sound will start @ first sample
+        }
       }
     }
-
-    // Trailer uncoupling sound, triggered by switch -----------------------------------------------
-    if (curUncouplingSample >= uncouplingSampleCount)
-    {
-      curUncouplingSample = 0;
-    }
-    if (uncouplingTrigger)
-    {
-      soundVal += (uncouplingSamples[curUncouplingSample] * couplingVolumePercentage / 100);
-      curUncouplingSample++;
-      if (curUncouplingSample >= uncouplingSampleCount)
-      {
-        uncouplingTrigger = false;
-        curUncouplingSample = 0;
-      }
-    }
-  #endif
-  #endif
-
-    // excavator sounds **************************************************
-
-  #if defined EXCAVATOR_MODE
-
-    // Hydraulic fluid flow sound -----------------------
-    if (curHydraulicFlowSample >= hydraulicFlowSampleCount)
-    {
-      curHydraulicFlowSample = 0;
-    }
-    soundVal += (hydraulicFlowSamples[curHydraulicFlowSample] * hydraulicFlowVolumePercentage / 100 * hydraulicFlowVolume / 100);
-    curHydraulicFlowSample++;
-
-    // Track rattle sound -----------------------
-    if (curTrackRattleSample >= trackRattleSampleCount)
-    {
-      curTrackRattleSample = 0;
-    }
-    soundVal += (trackRattleSamples[curTrackRattleSample] * trackRattleVolumePercentage / 100 * trackRattleVolume / 100);
-    curTrackRattleSample++;
-
-    // Bucket rattle sound -----------------------
-    if (curBucketRattleSample >= bucketRattleSampleCount)
-    {
-      curBucketRattleSample = 0;
-    }
-    if (bucketRattleTrigger)
-    {
-      soundVal += (bucketRattleSamples[curBucketRattleSample] * bucketRattleVolumePercentage / 100);
-      curBucketRattleSample++;
-      if (curBucketRattleSample >= bucketRattleSampleCount)
-      {
-        bucketRattleTrigger = false;
-        curBucketRattleSample = 0; // ensure, next sound will start @ first sample
-      }
-    }
-  #endif
 
     // additional sounds *************************************************
 
-  #if defined TIRE_SQUEAL
     // Tire squeal sound -----------------------
-    if (curTireSquealSample >= tireSquealSampleCount)
+    if (this.curTireSquealSample >= this.tireSquealSampleCount)
     {
-      curTireSquealSample = 0;
+      this.curTireSquealSample = 0;
     }
-    soundVal += (tireSquealSamples[curTireSquealSample] * tireSquealVolumePercentage / 100 * tireSquealVolume / 100);
-    curTireSquealSample++;
-  #endif
+    soundVal += (this.tireSquealSamples[this.curTireSquealSample] * this.tireSquealVolumePercentage / 100 * this.tireSquealVolume / 100);
+    this.curTireSquealSample++;
 
-  #if defined BATTERY_PROTECTION
     // Out of fuel sound, triggered by battery voltage -----------------------------------------------
-    if (curOutOfFuelSample >= outOfFuelSampleCount)
+    if (this.outOfFuelMessageTrigger)
     {
-      curOutOfFuelSample = 0;
-    }
-    if (outOfFuelMessageTrigger)
-    {
-      soundVal += (outOfFuelSamples[curOutOfFuelSample] * outOfFuelVolumePercentage / 100);
-      curOutOfFuelSample++;
-      if (curOutOfFuelSample >= outOfFuelSampleCount)
+      soundVal += (this.outOfFuelSamples[this.curOutOfFuelSample] * this.outOfFuelVolumePercentage / 100);
+      this.curOutOfFuelSample++;
+      if (this.curOutOfFuelSample >= this.outOfFuelSampleCount)
       {
-        outOfFuelMessageTrigger = false;
-        curOutOfFuelSample = 0; // ensure, next sound will start @ first sample
+        this.outOfFuelMessageTrigger = false;
+        this.curOutOfFuelSample = 0; // ensure, next sound will start @ first sample
       }
     }
-  #endif
 
-
-    uint8_t value = constrain(soundVal * masterVolume / 100 + dacOffset, 0, 255);
-    SET_PERI_REG_BITS(RTC_IO_PAD_DAC2_REG, RTC_IO_PDAC2_DAC, value, RTC_IO_PDAC2_DAC_S);
-
-    // portEXIT_CRITICAL_ISR(&fixedTimerMux);
+    let value = this.constrain(soundVal * this.masterVolume / 100 + this.dacOffset, 0, 255);
   }
+
+
+  //
+  // =======================================================================================================
+  // SIMULATED AUTOMATIC TRANSMISSION GEAR SELECTOR (running on core 0)
+  // =======================================================================================================
+  //
+
+  automaticGearSelector()
+  {
+    let downShiftPoint = 200;
+    let upShiftPoint = 490;
+
+    this._currentRpm2 = this.currentRpm;
+
+    if (this.millis() - this.gearSelectorMillis > 100)
+    { // Waiting for 100ms is very important. Otherwise gears are skipped!
+      this.gearSelectorMillis = this.millis();
+
+      // compute load dependent shift points (less throttle = less rpm before shifting up, kick down will shift back!)
+      upShiftPoint = this.map(this.engineLoad, 0, 180, 390, 490);   // 390, 490
+      downShiftPoint = this.map(this.engineLoad, 0, 180, 150, 250); // 150, 250
+
+      if (this.escInReverse)
+      { // Reverse (only one gear)
+        this.selectedAutomaticGear = 0;
+      }
+      else
+      { // Forward (multiple gears)
+
+        // Adaptive shift points
+        if (this.millis() - this.lastDownShiftingMillis > 500 && this._currentRpm >= upShiftPoint && this.engineLoad < 5)
+        {                          // 500ms locking timer!
+          this.selectedAutomaticGear++; // Upshifting (load maximum is important to prevent gears from oscillating!)
+          this.lastUpShiftingMillis = this.millis();
+        }
+        if (this.millis() - this.lastUpShiftingMillis > 600 && this.selectedAutomaticGear > 1 && (this._currentRpm <= downShiftPoint || this.engineLoad > 100))
+        {                          // 600ms locking timer! TODO was 1000
+          this.selectedAutomaticGear--; // Downshifting incl. kickdown
+          this.lastDownShiftingMillis = this.millis();
+        }
+
+        this.selectedAutomaticGear = this.constrain(this.selectedAutomaticGear, 1, this.NumberOfAutomaticGears);
+      }
+    }
+  }
+
 
 }
 
