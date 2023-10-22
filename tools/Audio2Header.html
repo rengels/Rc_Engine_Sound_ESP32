@@ -1,5 +1,6 @@
 <head>
 <script>
+"use strict";
 
 // note: the surprising behaviour of the AudioContext.
 // The reported sample rate is not the one from the file.
@@ -62,7 +63,6 @@ function audioBufferToText(audioBuffer, normalize, resample, removeNoiseFloor, s
     }
   }
 
-
 	const snippet = document.getElementById("fileTypeSelect").value;
 	let text = "const unsigned int " + snippet + "ampleRate = " + sampleRate + ";\r\n";
 	text += "const unsigned int " + snippet + "ampleCount = " + buffer.length + ";\r\n";
@@ -85,11 +85,19 @@ function audioBufferToText(audioBuffer, normalize, resample, removeNoiseFloor, s
 	for (let i = 0; i < buffer.length; i++)
 	{
 		out = Math.round(buffer[i] * 127);
+
+    // if the input is a WAV float, the values can be outside -1..1
+    if (out < -127)
+      out = -127;
+    if (out > 127)
+      out = 127;
+   
 		if (removeNoiseFloor) //removeNoiseFloor
 		{
 			if (out < 2 && out > -2)
         out = 0;
 		}
+
 		if ((i & 15) == 0)
       text += "//" + i + "\r\n"; // new line with sample number
 		text += out + ", ";
@@ -101,21 +109,25 @@ function audioBufferToText(audioBuffer, normalize, resample, removeNoiseFloor, s
 
 function convert(event)
 {
-	let audioBuffer = null;
 	let reader = new FileReader();
 	let file = event.target.files[0];
 	reader.onload = function(){
-	    context.decodeAudioData(reader.result, function(buffer) {
-			let link = document.createElement("a");
-			link.download = file.name.split('.', 1)[0] + ".h";
-			link.href = URL.createObjectURL(new Blob(
-			[audioBufferToText(buffer, document.getElementById("normalize").checked, document.getElementById("resample").checked, document.getElementById("removeNoiseFloor").checked, document.getElementById("samplerate").value)], {type: "text/plain"}));
-			document.body.appendChild(document.createElement("br"));
-			document.body.appendChild(link);
-			link.innerHTML = link.download;
-			link.click();
-			//document.body.removeChild(link);
-			event.target.value = "";
+    context.decodeAudioData(reader.result, function(buffer) {
+      let link = document.createElement("a");
+      link.download = file.name.split('.', 1)[0] + ".h";
+      link.href = URL.createObjectURL(new Blob(
+      [audioBufferToText(buffer,
+        document.getElementById("normalize").checked,
+        document.getElementById("resample").checked,
+        document.getElementById("removeNoiseFloor").checked,
+        document.getElementById("samplerate").value)],
+        {type: "text/plain"}));
+      document.body.appendChild(document.createElement("br"));
+      document.body.appendChild(link);
+      link.innerHTML = link.download;
+      link.click();
+      //document.body.removeChild(link);
+      event.target.value = "";
 		}, function(){
 			//error
 		});

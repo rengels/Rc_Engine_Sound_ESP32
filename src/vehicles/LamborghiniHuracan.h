@@ -4,28 +4,25 @@
 // note: The sound is really different depending on your position
 // around the car (e.g. exaust) and the mode (e.g. corsa mode)
 //
-// So this is kind of generic
+// The sound samples are recorded near the exaust in strada mode.
 
-// Sound files (22'050 Hz, 8 bit PCM recommended) -----------------------------------------------------------------------
-// Choose the start sound (uncomment the one you want) --------
-const int32_t startVolumePercentage = 100;
-#include "sounds/HuracanStart4.h"
+const int32_t startVolumePercentage = 200;
+#include "sounds/HuracanStart5.h"
 
-// Choose the motor idle sound (uncomment the one you want) --------
-const int32_t idleVolumePercentage = 100;
-const int32_t engineIdleVolumePercentage = 5;
+const int32_t idleVolumePercentage = 200;
+const int32_t engineIdleVolumePercentage = 25;
 const int32_t fullThrottleVolumePercentage = 100;
-#include "sounds/HuracanIdle4.h"
+// #include "sounds/LaFerrariIdle.h" // Jaguar XJS V12
+#include "sounds/HuracanIdle5.h"
 
-// Choose the motor revving sound (uncomment the one you want) --------
-// #define REV_SOUND // uncomment this, if you want to use the separate, optional rev sound
-const int32_t revVolumePercentage = 100; // Adjust the idle volume (usually = 100%, more also working, depending on sound)
-const int32_t engineRevVolumePercentage = 60; // the engine volume will be throttle dependent (usually = 40%, never more than 100%!)
-const uint16_t revSwitchPoint = 50; // The rev sound is played instead of the idle sound above this point
-const uint16_t idleEndPoint = 300; // above this point, we have 100% rev and 0% idle sound volume (usually 500, min. 50 more than revSwitchPoint)
-const uint16_t idleVolumeProportionPercentage = 100; // The idle sound volume proportion (rest is rev proportion) below "revSwitchPoint" (about 90 - 100%, never more than 100)
+#define REV_SOUND
+const int32_t revVolumePercentage = 100;
+const int32_t engineRevVolumePercentage = 60;
+const uint16_t revSwitchPoint = 50;
+const uint16_t idleEndPoint = 200;
+const uint16_t idleVolumeProportionPercentage = 100;
 #ifdef REV_SOUND
-#include "sounds/HuracanRev3.h"
+#include "sounds/HuracanRev5.h"
 #endif
 
 // Choose the jake brake sound (uncomment the one you want) --------
@@ -120,26 +117,27 @@ volatile int tireSquealVolumePercentage = 100;
 const boolean doubleFlashBlueLight = true; // double flash blue lights if "true", "rotating" beacons if "false"
 
 // Acceleration & deceleration settings ----------------------------------------------------------------------------------
-const uint8_t escRampTimeFirstGear = 20; // determines, how fast the acceleration and deceleration happens (about 15 - 25, 20 for King Hauler)
-const uint8_t escRampTimeSecondGear = 30; // 50 for King Hauler (this value is always in use for automatic transmission, about 80)
-const uint8_t escRampTimeThirdGear = 40; // 75 for King Hauler
+const uint8_t escRampTimeFirstGear = 15; // determines, how fast the acceleration and deceleration happens (about 15 - 25, 20 for King Hauler)
+const uint8_t escRampTimeSecondGear = 20; // 50 for King Hauler (this value is always in use for automatic transmission, about 80)
+const uint8_t escRampTimeThirdGear = 30; // 75 for King Hauler
 const uint8_t escBrakeSteps = 50; // determines, how fast the ESC is able to brake down (20 - 30, 30 for King Hauler)
-const uint8_t escAccelerationSteps = 5; // determines, how fast the ESC is able to accelerate (2 - 3, 3 for King Hauler)
+const uint8_t escAccelerationSteps = 3; // determines, how fast the ESC is able to accelerate (2 - 3, 3 for King Hauler)
 
 // Gearbox parameters ---------------------------------------------------------------------------------------------------
 const boolean automatic = true; // false = linear rpm curve, true = automatic transmission with torque converter is simulated (use it, if you don't have a real shifting transmission)
 #define NumberOfAutomaticGears 6 // <<------- Select 3, 4 or 6 gears!
-const boolean doubleClutch = true; // do not activate it at the same time as automatic!
-const boolean shiftingAutoThrottle = true; // For Tamiya 3 speed tansmission, throttle is altered for synchronizing, if "true"
+const boolean doubleClutch = false; // do not activate it at the same time as automatic!
+const boolean shiftingAutoThrottle = false; // For Tamiya 3 speed tansmission, throttle is altered for synchronizing, if "true"
 
 // Clutch parameters ---------------------------------------------------------------------------------------------------
 uint16_t clutchEngagingPoint = 100; // CEP. The "clutch" is engaging above this point = engine rpm sound in synch with ESC power
 
 // Engine parameters ----------------------------------------------------------------------------------------------------
-// Engine max. RPM in % of idle RPM. About 200% for big Diesels, 390% for fast running motors.
-uint32_t MAX_RPM_PERCENTAGE = 350; // NOTE! Was called TOP_SPEED_MULTIPLIER (TSM) in earlier versions and was a multiplier instead of a percentage!
+// Engine max. RPM in % of idle RPM.
+// Huracan idle: 1000 RPM, 8500 RPM is redline (max power output 8250 RPM)
+uint32_t MAX_RPM_PERCENTAGE = 350;
 
 // Engine mass simulation
 const int8_t acc = 2; // Acceleration step (2) 1 = slow for locomotive engine, 9 = fast for trophy truck. Always 2 for automatic transmission!
-const int8_t dec = 10; // Deceleration step (1) 1 = slow for locomotive engine, 5 = fast for trophy truck
+const int8_t dec = 5; // Deceleration step (1) 1 = slow for locomotive engine, 5 = fast for trophy truck
 

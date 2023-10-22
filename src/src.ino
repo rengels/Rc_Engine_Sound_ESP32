@@ -334,6 +334,9 @@ uint32_t maxIbusRpmPercentage = 320; // Limit required to prevent controller fro
 // Interrupt latches
 volatile boolean couplerSwitchInteruptLatch; // this is enabled, if the coupler switch pin change interrupt is detected
 
+
+
+
 // Control input signals
 #define PULSE_ARRAY_SIZE 14                // 13 channels (+ the unused CH0)
 uint16_t pulseWidthRaw[PULSE_ARRAY_SIZE];  // Current RC signal RAW pulse width [X] = channel number
@@ -772,6 +775,9 @@ void IRAM_ATTR variablePlaybackTimer()
     else
     {
       curStartSample = 0;
+#ifdef REV_SOUND
+      curRevSample = 0;
+#endif
       engineState = RUNNING;
       engineStart = false;
       engineRunning = true;
@@ -802,9 +808,12 @@ void IRAM_ATTR variablePlaybackTimer()
         // idle sound. For example 4 or 8 for a V8 engine. It also needs to have about the same length. In order to adjust the length
         // or "revSampleCount", change the "Rate" setting in Audacity until it is about the same.
 #ifdef REV_SOUND
+        if (curRevSample >= revSampleCount)
+        {
+          curRevSample = 0;
+        }
         revVal = (revSamples[curRevSample] * throttleDependentRevVolume / 100 * revVolumePercentage / 100); // Rev sound
-        if (curRevSample < revSampleCount)
-          curRevSample++;
+        curRevSample++;
 #endif
 
         // Trigger throttle dependent Diesel ignition "knock" sound (played in the fixed sample rate interrupt)
@@ -820,9 +829,6 @@ void IRAM_ATTR variablePlaybackTimer()
         curEngineSample = 0;
         if (jakeBrakeRequest)
           engineJakeBraking = true;
-#ifdef REV_SOUND
-        curRevSample = 0;
-#endif
         lastDieselKnockSample = 0;
         dieselKnockTrigger = true;
         dieselKnockTriggerFirst = true;

@@ -35,7 +35,7 @@
 // #include "vehicles/ManTgx.h" // MAN TGX 680 V8 truck
 // #include "vehicles/ManKat.h" // MAN KAT V8 Diesel German Bundeswehr military truck
 // #include "vehicles/MagirusDeutz256.h" // Magirus Deutz 256 air coolded V8 Diesel truck
-#include "vehicles/MagirusMercur125.h" // Magirus Mercur air coolded V6 Diesel truck
+// #include "vehicles/MagirusMercur125.h" // Magirus Mercur air coolded V6 Diesel truck
 // #include "vehicles/Saurer2DM.h" // Swiss Saurer 2DM R6 Diesel truck
 
 // Russian trucks --------
@@ -70,7 +70,7 @@
 // #include "vehicles/JaguarXJSautomatic.h" // Jaguar XJS V12, automatic transmission
 // #include "vehicles/MGBGtV8.h" // MGB GT V8, manual transmission
 // #include "vehicles/LaFerrari.h" // Ferrari LaFerrari, V12, 6 speed double clutch transmission
-// #include "vehicles/LamborghiniHuracan.h" // Lamborghini Huracan, V10, 7 speed double clutch transmission
+// #include "vehicles/LamborghiniHuracan.h" // Lamborghini Huracan, V10, 7 speed automatic transmission
 
 // US SUV & Pickups --------
 // #include "vehicles/JeepGrandCherokeeTrackhawk.h" // Jeep Grand Cherokee Trackhawk V8 monster SUV with supercharger, 6 speed automatic
@@ -83,7 +83,7 @@
 // #include "vehicles/JeepWranglerRubicon392V8_2.h" // 2021 Jeep Wrangler Rubicon HEMI 392 V8 (insane bass!)
 
 // EU SUV --------
-// #include "vehicles/DefenderV8Automatic.h" // Land Rover Defender 90 V8 automatic (very nice V8 with lots of bass)
+#include "vehicles/DefenderV8Automatic.h" // Land Rover Defender 90 V8 automatic (very nice V8 with lots of bass)
 // #include "vehicles/DefenderV8OpenPipeAutomatic.h" // Land Rover Defender 90 V8 automatic, open pipes (optimised for smaller speakers)
 // #include "vehicles/DefenderV8OpenPipe.h" // Land Rover Defender 90 V8 manual, open pipes (optimised for smaller speakers)
 // #include "vehicles/DefenderV8CrawlerAutomatic.h" // Land Rover Defender 90 V8 automatic crawler
