@@ -164,7 +164,7 @@ const uint8_t PWM_CHANNELS[PWM_CHANNELS_NUM] = {1, 2, 3, 4, 5, 6};   // Channel 
 const uint8_t PWM_PINS[PWM_CHANNELS_NUM] = {13, 12, 14, 27, 35, 34}; // Input pin numbers (pin 34 & 35 only usable as inputs!)
 
 // Output pins -----
-#define ESC_OUT_PIN 33 // connect crawler type ESC here. Not supported in TRACKED_MODE -----
+#define ESC_OUT_PIN 33 // connect crawler type ESC here.
 
 #define RZ7886_PIN1 33 // RZ7886 motor driver pin 1 (same as ESC_OUT_PIN)
 #define RZ7886_PIN2 32 // RZ7886 motor driver pin 2 (same as BRAKELIGHT_PIN)
@@ -601,6 +601,18 @@ const char *RESET_REASONS[] = {"POWERON_RESET", "NO_REASON", "SW_RESET", "OWDT_R
 float us2degree(uint16_t value)
 {
   return (value - 500) / 11.111 - 90.0;
+}
+
+/** Clams the value to minValue/maxValue including */
+uint16_t clamp(uint16_t value, uint16_t minValue, uint16_t maxValue)
+{
+  if (value < minValue) {
+    return minValue;
+  } if (value > maxValue) {
+    return maxValue;
+  } else {
+    return value;
+  }
 }
 
 //
@@ -1491,6 +1503,9 @@ void IRAM_ATTR onTrailerDataSent(const uint8_t *mac_addr, esp_now_send_status_t 
 //
 // See: https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/mcpwm.html#configure
 
+/** Setup PWM unit 0 for servo outputs.
+ *
+ */
 void setupMcpwm()
 {
   // 1. set our servo output pins
@@ -1501,7 +1516,7 @@ void setupMcpwm()
 
   // 2. configure MCPWM parameters
   mcpwm_config_t pwm_config;
-  pwm_config.frequency = SERVO_FREQUENCY; // frequency usually = 50Hz, some servos may run smoother @ 100Hz
+  pwm_config.frequency = 50; // frequency always 50Hz (it's not a servo)
   pwm_config.cmpr_a = 0;                  // duty cycle of PWMxa = 0
   pwm_config.cmpr_b = 0;                  // duty cycle of PWMxb = 0
   pwm_config.counter_mode = MCPWM_UP_COUNTER;
@@ -1529,7 +1544,7 @@ void setupMcpwmESC()
 
   // 2. configure MCPWM parameters
   mcpwm_config_t pwm_config;
-  pwm_config.frequency = 50; // frequency always 50Hz
+  pwm_config.frequency = SERVO_FREQUENCY; // frequency usually = 50Hz, some servos may run smoother @ 100Hz
   pwm_config.cmpr_a = 0;     // duty cycle of PWMxa = 0
   pwm_config.cmpr_b = 0;     // duty cycle of PWMxb = 0
   pwm_config.counter_mode = MCPWM_UP_COUNTER;
@@ -2703,6 +2718,19 @@ void mcpwmOutput()
     }
 #endif
 
+#if defined CH3_TRACKED
+    uint16_t trackRightSignal =
+        clamp(escSignal + (pulseWidth[1] - pulseZero[1]) / 2,
+              pulseMin[1], pulseMax[1]);
+    mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_1, MCPWM_OPR_B, trackRightSignal);
+#endif
+
+#if defined CH4_TRACKED
+    uint16_t trackLeftSignal =
+        clamp(escSignal - (pulseWidth[1] - pulseZero[1]) / 2,
+              pulseMin[1], pulseMax[1]);
+    mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_1, MCPWM_OPR_B, trackLeftSignal);
+#else
     // Trailer coupler (5th wheel) CH4 **********************
     static uint16_t couplerServoMicros;
     if (unlock5thWheel)
@@ -2710,6 +2738,7 @@ void mcpwmOutput()
     else
       couplerServoMicros = CH4L;
     mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_1, MCPWM_OPR_A, couplerServoMicros);
+#endif
   }
 
   // Print servo signal debug infos **********************
@@ -2731,8 +2760,17 @@ void mcpwmOutput()
     Serial.printf("CH3 (beacon)    :  %i µS, %f°\n", beaconServoMicros, us2degree(beaconServoMicros));
 #endif
 
+#if defined CH3_TRACKED
+    Serial.printf("CH3 (tracked)    :  %i µS, %f°\n", trackRightSignal, us2degree(trackRightSignal));
+#endif
+
+#if defined CH4_TRACKED
+    Serial.printf("CH4 (tracked)    :  %i µS, %f°\n", trackRightSignal, us2degree(trackRightSignal));
+
+#else
     Serial.printf("CH4 (5th wheel):  %i µS, %.2f°\n", couplerServoMicros, us2degree(couplerServoMicros));
     Serial.printf("-------------------------------------\n");
+#endif
   }
 #endif // SERVO_DEBUG
 }
