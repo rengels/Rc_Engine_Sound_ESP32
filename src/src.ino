@@ -456,6 +456,19 @@ volatile boolean neutralGear = false; // Transmission in neutral
 boolean lowRange = false;             // Transmission range (off road reducer)
 
 // ESC
+static uint16_t escPulseWidth = 1500;
+static uint16_t escPulseWidthOut = 1500;
+static uint16_t escSignal = 1500;
+static uint8_t motorDriverDuty = 0;
+static unsigned long escMillis;
+static unsigned long lastStateTime;
+// static int8_t pulse; // -1 = reverse, 0 = neutral, 1 = forward
+// static int8_t escPulse; // -1 = reverse, 0 = neutral, 1 = forward
+static int8_t driveRampRate;
+static int8_t driveRampGain;
+static int8_t brakeRampRate;
+uint16_t escRampTime;
+
 volatile boolean escIsBraking = false; // ESC is in a braking state
 volatile boolean escIsDriving = false; // ESC is in a driving state
 volatile boolean escInReverse = false; // ESC is driving or braking backwards
@@ -4085,19 +4098,6 @@ void automaticGearSelector()
 // ESC CONTROL (including optional battery protection)
 // =======================================================================================================
 //
-
-static uint16_t escPulseWidth = 1500;
-static uint16_t escPulseWidthOut = 1500;
-static uint16_t escSignal = 1500;
-static uint8_t motorDriverDuty = 0;
-static unsigned long escMillis;
-static unsigned long lastStateTime;
-// static int8_t pulse; // -1 = reverse, 0 = neutral, 1 = forward
-// static int8_t escPulse; // -1 = reverse, 0 = neutral, 1 = forward
-static int8_t driveRampRate;
-static int8_t driveRampGain;
-static int8_t brakeRampRate;
-uint16_t escRampTime;
 
 // ESC sub functions =============================================
 // We always need the data up to date, so these comparators are programmed as sub functions!
