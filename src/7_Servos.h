@@ -34,8 +34,10 @@
 // Default servo configuration profile -------------------------------------------------------------------------------------------
 #ifdef SERVOS_DEFAULT
 
-#define CH3_BEACON              // Rotating Beacons are connected to Servo CH3. BUS mode only! https://www.ebay.ch/itm/303979210629
-#define MODE2_TRAILER_UNLOCKING // The mode 2 button is used for trailer unlocking by servo CH4 (sound1 triggering will not work!)
+#define CH3_TRACKED // tracked esc output on channel 3
+#define CH4_TRACKED // tracked esc output on channel 4
+// #define CH3_BEACON              // Rotating Beacons are connected to Servo CH3. BUS mode only! https://www.ebay.ch/itm/303979210629
+// #define MODE2_TRAILER_UNLOCKING // The mode 2 button is used for trailer unlocking by servo CH4 (sound1 triggering will not work!)
 
 // Servo frequency
 const uint8_t SERVO_FREQUENCY = 50; // usually 50Hz, some servos may run smoother @ 100Hz
