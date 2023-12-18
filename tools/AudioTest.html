@@ -8,6 +8,129 @@
 window.AudioContext = window.AudioContext || window.webkitAudioContext;
 var context = new AudioContext();
 
+/** Class for keeping track of an audio block.
+ *
+ *  This is a segment from the original audio buffer
+ *  with start, end, volume and RMP information.
+ */
+class AudioBlock {
+  buffer = null; ///< float 32 array (-1..1) with full audio data
+  sampleStart = 0; ///< start sample in the audio buffer of this block
+  sampleEnd = 0; ///< end sample in the audio buffer of this block
+  sampleRate = 0; ///< Samples per second of the buffer data
+
+  constructor(buffer, sampleStart, sampleEnd, sampleRate) {
+    this.buffer = buffer;
+    this.sampleStart = sampleStart;
+    this.sampleEnd = sampleEnd;
+    this.sampleRate = sampleRate;
+  }
+
+  /// float with the max difference between the audio samples
+  get volume() {
+    let minValue = 0;
+    let maxValue = 0;
+    for (let j = this.sampleStart; j < this.sampleEnd; j++) {
+      maxValue = Math.max(maxValue, this.buffer[j]);
+      minValue = Math.min(minValue, this.buffer[j]);
+    }
+    return maxValue - minValue;
+  }
+
+  /// rpm in this audio block.
+  get rpm() {
+    return 60.0 * this.sampleRate / (this.sampleEnd - this.sampleStart);
+  }
+}
+
+/** Class for handling an EngineRampSound.
+ *
+ *  It can analyze an engine sound and extract
+ *  sample pieces to be used to synthesize
+ *  engine sound later on from those samples.
+ */
+class EngineRampSound {
+
+  buffer = []; ///< float 32 array (-1..1) with full audio data
+  noCylinders = 0; ///< number of cylinders
+  sampleRate = 0; ///< Samples per second of the buffer data
+
+  blocks = []; ///< an array of AudioBlock objects
+
+  rpmMin = 1000; ///< min rpm used for sound blocks
+  rpmMax = 2000; ///< max rpm used for sound blocks
+  rpmStep = 5;
+
+  /** An array of block objects, for the range of RPMs */
+  accelBlocks = new Array(Math.ceil((this.rpmMax - this.rpmMin) / this.rpmStep));
+
+  /** An array of block objects, for the range of RPMs */
+  deccelBlocks = new Array(Math.ceil((this.rpmMax - this.rpmMin) / this.rpmStep));
+
+  /** Constructs an EngineRampSound
+   *
+   *  @param audioBuffer An AudioBuffer object with the audio input.
+   *  @param noCylinders The number of cylinders in the engine.
+   */
+  constructor(audioBuffer, noCylinders) {
+    this.buffer = audioBuffer.getChannelData(0);
+    // -- convert to mono if not already
+    if (audioBuffer.numberOfChannels > 1) {
+      for(let c = 1; c < audioBuffer.numberOfChannels; c++) {
+        const cb = audioBuffer.getChannelData(c);
+        for(let i = 0; i < cp.length; i++) {
+          this.buffer[i] += cb[i];
+        }
+      }
+    }
+
+    this.noCylinders = noCylinders;
+    this.sampleRate = audioBuffer.length / audioBuffer.duration;
+
+    // split up the audio into blocks
+    const positions = keepNthPositions(
+      cleanUpPositions(
+        zeroCrossings(
+          filterLowpass(this.buffer, 20)), 100),
+      noCylinders);
+
+    this.blocks = [];
+    for (let i = 0; i < positions.length - 1; i++) {
+      this.blocks.push(new AudioBlock(
+        this.buffer, positions[i], positions[i+1], this.sampleRate));
+    }
+
+    // pick suitable accel and deccel blocks
+    for (let i = 0; i < this.blocks.length; i++) {
+      const rpm = this.blocks[i].rpm;
+      const pos = Math.round((rpm - this.rpmMin) / this.rpmStep);
+      if ((pos < 0) || pos >= this.accelBlocks.length) {
+        continue;
+      }
+
+      // see if this is an accel or deccel block by looking
+      // at the rpms of the neighbouring blocks
+      let rpmPrev = rpm;
+      if (i > 0) {
+        rpmPrev = this.blocks[i - 1].rpm;
+      }
+      let rpmNext = rpm;
+      if (i < this.blocks.length - 1) {
+        rpmNext = this.blocks[i + 1].rpm;
+      }
+
+      if ((rpmPrev <= rpm) && (rpm < rpmNext)) {
+        this.accelBlocks[pos] = i;
+      } else if ((rpmPrev >= rpm) && (rpm > rpmNext)) {
+        this.deccelBlocks[pos] = i;
+      } else {
+        // ignore this block
+      }
+    }
+  }
+};
+
+
 /** Decodes a .h file and returns a buffer.
  *
  *  @returns An array with sample rate and the buffer data.
@@ -192,8 +315,31 @@ function zeroCrossings(bufferIn) {
 }
 
 
-/** Cleans up the positions values by removing
- *  ones that are smaller than the minimum value.
+/** Returns an array of the positions in the input buffer
+ *  where the first derivative changes it's sign
+ *
+ *  @param bufferIn An array with the audio samples.
+ */
+function localMinima(bufferIn) {
+  let positions = [0];
+  for (let i = 1; i < bufferIn.length - 1; i++) {
+    const diff1 = bufferIn[i - 1] - bufferIn[i];
+    const diff2 = bufferIn[i] - bufferIn[i + 1];
+    if (diff1 < 0 && diff2 >= 0) {
+      positions.push(i);
+    }
+  }
+  positions.push(bufferIn.length - 1);
+
+  return positions;
+}
+
+
+/** Cleans up the positions.
+ *
+ *  Since we can't split too large blocks, we
+ *  are merging blocks that are below minimum
+ *  length.
  *
  *  Keeps the first and the last position.
  *
@@ -204,7 +350,7 @@ function cleanUpPositions(positionsIn, minDist) {
   let positionsOut = [positionsIn[0]];
 
   for (let i = 1; i < positionsIn.length - 1; i++) {
-    if (positionsIn[i] - positionsIn[i-1] >= minDist) {
+    if (positionsIn[i] - positionsOut[positionsOut.length - 1] >= minDist) {
       positionsOut.push(positionsIn[i]);
     }
   }
@@ -374,33 +520,14 @@ function processFile(event)
 
 function analyzeAudio(audioBuffer, noCylinders)
 {
-  // float 32 array (-1..1)
-	let buffer = audioBuffer.getChannelData(0);
-  const origSampleRate = audioBuffer.length / audioBuffer.duration;
-
-  // -- convert to mono if not already
-	if (audioBuffer.numberOfChannels > 1)
-	{
-		for(let c = 1; c < audioBuffer.numberOfChannels; c++)
-		{
-			const cb = audioBuffer.getChannelData(c);
-			for(let i = 0; i < cp.length; i++)
-				buffer[i] += cb[i];
-		}
-	}
-
-  const positions = keepNthPositions(
-    cleanUpPositions(
-      zeroCrossings(
-        filterLowpass(buffer, 20)), 100), noCylinders);
+  const engineRampSound = new EngineRampSound(audioBuffer, noCylinders);
   
-  const volumes = calcVolumeBlock(positions, buffer);
+  const volumes   = engineRampSound.blocks.map((x) => x.volume);
   const maxVolume = Math.max(...volumes);
   const minVolume = Math.min(...volumes);
-  const rpms = calcRpmBlock(positions, origSampleRate);
-  const maxRPM = Math.max(...rpms);
-  const minRPM = Math.min(...rpms);
-
+  const rpms      = engineRampSound.blocks.map((x) => x.rpm);
+  const maxRPM    = Math.max(...rpms);
+  const minRPM    = Math.min(...rpms);
 
   // Set 2d context and dimensions
   const canvasContainer = document.getElementById("graphSection");
@@ -411,12 +538,14 @@ function analyzeAudio(audioBuffer, noCylinders)
   canvasEl.width = width;
   canvasEl.height = height;
 
+  canvasCtx.clearRect(0, 0, width, height);
+
   // Set fill and create axis
   canvasCtx.fillStyle = "white";
   canvasCtx.fillRect(0, 0, width, height);
 
-  const spacing = width / 16;
-  const fontSize = Math.floor(spacing / 2.5);
+  const spacing = 16;
+  const fontSize = 10;
   canvasCtx.lineWidth = 2;
   canvasCtx.strokeStyle = "grey";
 
@@ -432,7 +561,7 @@ function analyzeAudio(audioBuffer, noCylinders)
   canvasCtx.fillText(maxRPM.toFixed() + "/" + maxVolume.toFixed(2),
     spacing - fontSize, spacing + fontSize);
   canvasCtx.fillText("rpm/vol",
-    spacing - fontSize, (height - spacing + fontSize) / 2);
+    spacing - fontSize, height / 2 + fontSize);
   canvasCtx.fillText(minRPM.toFixed() + "/" + minVolume.toFixed(2),
     spacing - fontSize, height - spacing + fontSize);
   canvasCtx.fillText("sec",
@@ -440,12 +569,35 @@ function analyzeAudio(audioBuffer, noCylinders)
   canvasCtx.fillText(audioBuffer.duration.toString(),
     width - spacing, height - spacing + fontSize);
 
+  const noSamples = engineRampSound.buffer.length;
+
+  // convert an index into an x-position
+  const convX = function(i) {
+    return spacing +
+       (engineRampSound.blocks[i].sampleStart / noSamples) * (width - spacing * 2);
+  }
+
+  // Draw graph volume
+  canvasCtx.beginPath();
+  for (let i = 0; i < engineRampSound.blocks.length; i++) {
+    const xPos = convX(i);
+    const yPos = height -
+      (spacing + (engineRampSound.blocks[i].volume - minVolume) / (maxVolume - minVolume ) * (height - spacing * 2));
+    if (i === 0) {
+      canvasCtx.moveTo(xPos, yPos);
+    } else {
+      canvasCtx.lineTo(xPos, yPos);
+    }
+  }
+  canvasCtx.strokeStyle = "gray";
+  canvasCtx.stroke();
+
   // Draw graph RPM
   canvasCtx.beginPath();
-  for (let i = 0; i < rpms.length; i++) {
-    const xPos = spacing + (i / rpms.length) * (width - spacing * 2);
+  for (let i = 0; i < engineRampSound.blocks.length; i++) {
+    const xPos = convX(i);
     const yPos = height -
-      (spacing + (rpms[i] - minRPM) / (maxRPM - minRPM ) * (height - spacing * 2));
+      (spacing + (engineRampSound.blocks[i].rpm - minRPM) / (maxRPM - minRPM ) * (height - spacing * 2));
     if (i === 0) {
       canvasCtx.moveTo(xPos, yPos);
     } else {
@@ -455,20 +607,32 @@ function analyzeAudio(audioBuffer, noCylinders)
   canvasCtx.strokeStyle = "black";
   canvasCtx.stroke();
 
-  // Draw graph volume
-  canvasCtx.beginPath();
-  for (let i = 0; i < volumes.length; i++) {
-    const xPos = spacing + (i / volumes.length) * (width - spacing * 2);
-    const yPos = height -
-      (spacing + (volumes[i] - minVolume) / (maxVolume - minVolume ) * (height - spacing * 2));
-    if (i === 0) {
-      canvasCtx.moveTo(xPos, yPos);
-    } else {
-      canvasCtx.lineTo(xPos, yPos);
+  canvasCtx.lineWidth = 1;
+  // accel blocks
+  for (let i = 0; i < engineRampSound.accelBlocks.length; i++) {
+    if (!engineRampSound.accelBlocks[i]) {
+      continue;
     }
+    const xPos = convX(engineRampSound.accelBlocks[i]);
+    canvasCtx.beginPath();
+    canvasCtx.moveTo(xPos, height - spacing);
+    canvasCtx.lineTo(xPos, height - spacing * 2);
+    canvasCtx.strokeStyle = "red";
+    canvasCtx.stroke();
   }
-  canvasCtx.strokeStyle = "gray";
-  canvasCtx.stroke();
+
+  // deccel blocks
+  for (let i = 0; i < engineRampSound.deccelBlocks.length; i++) {
+    if (!engineRampSound.deccelBlocks[i]) {
+      continue;
+    }
+    const xPos = convX(engineRampSound.deccelBlocks[i]);
+    canvasCtx.beginPath();
+    canvasCtx.moveTo(xPos, height - spacing);
+    canvasCtx.lineTo(xPos, height - spacing * 2);
+    canvasCtx.strokeStyle = "blue";
+    canvasCtx.stroke();
+  }
 }
 
 
@@ -531,7 +695,6 @@ function analyzeFile(file)
         type="file"
         accept="*.wav"
         onchange="document.getElementById('inputAnalyze').disabled = false"/>
-    <br />
     <label for="inputCylinders2">Cylinders</label>
     <input id="inputCylinders2" type="number" min="1" max="12" value="10"/>
     <br />
@@ -545,6 +708,15 @@ function analyzeFile(file)
       style="width: 30vw; height: 10vw;">
       <canvas id="graphCanvas" />
     </section>
+
+    <label for="inputCylinders3">Cylinders</label>
+    <input id="inputCylinders3" type="number" min="1" max="12" value="10"/>
+    <br />
+    <input type="button" id="inputSynthesize"
+        onclick="synthesizeFile()"
+        disabled
+        value="Synthesize"/>
+    <br />
   </fieldset>
 
   <small>
