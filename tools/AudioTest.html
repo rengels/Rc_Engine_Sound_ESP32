@@ -1,5 +1,519 @@
 <head>
 <script>
+
+// *** fft library
+// https://github.com/indutny/fft.js/
+// license MIT
+'use strict';
+
+function FFT(size) {
+  this.size = size | 0;
+  if (this.size <= 1 || (this.size & (this.size - 1)) !== 0)
+    throw new Error('FFT size must be a power of two and bigger than 1');
+
+  this._csize = size << 1;
+
+  // NOTE: Use of `var` is intentional for old V8 versions
+  var table = new Array(this.size * 2);
+  for (var i = 0; i < table.length; i += 2) {
+    const angle = Math.PI * i / this.size;
+    table[i] = Math.cos(angle);
+    table[i + 1] = -Math.sin(angle);
+  }
+  this.table = table;
+
+  // Find size's power of two
+  var power = 0;
+  for (var t = 1; this.size > t; t <<= 1)
+    power++;
+
+  // Calculate initial step's width:
+  //   * If we are full radix-4 - it is 2x smaller to give inital len=8
+  //   * Otherwise it is the same as `power` to give len=4
+  this._width = power % 2 === 0 ? power - 1 : power;
+
+  // Pre-compute bit-reversal patterns
+  this._bitrev = new Array(1 << this._width);
+  for (var j = 0; j < this._bitrev.length; j++) {
+    this._bitrev[j] = 0;
+    for (var shift = 0; shift < this._width; shift += 2) {
+      var revShift = this._width - shift - 2;
+      this._bitrev[j] |= ((j >>> shift) & 3) << revShift;
+    }
+  }
+
+  this._out = null;
+  this._data = null;
+  this._inv = 0;
+}
+
+FFT.prototype.fromComplexArray = function fromComplexArray(complex, storage) {
+  var res = storage || new Array(complex.length >>> 1);
+  for (var i = 0; i < complex.length; i += 2)
+    res[i >>> 1] = complex[i];
+  return res;
+};
+
+FFT.prototype.createComplexArray = function createComplexArray() {
+  const res = new Array(this._csize);
+  for (var i = 0; i < res.length; i++)
+    res[i] = 0;
+  return res;
+};
+
+FFT.prototype.toComplexArray = function toComplexArray(input, storage) {
+  var res = storage || this.createComplexArray();
+  for (var i = 0; i < res.length; i += 2) {
+    res[i] = input[i >>> 1];
+    res[i + 1] = 0;
+  }
+  return res;
+};
+
+FFT.prototype.completeSpectrum = function completeSpectrum(spectrum) {
+  var size = this._csize;
+  var half = size >>> 1;
+  for (var i = 2; i < half; i += 2) {
+    spectrum[size - i] = spectrum[i];
+    spectrum[size - i + 1] = -spectrum[i + 1];
+  }
+};
+
+FFT.prototype.transform = function transform(out, data) {
+  if (out === data)
+    throw new Error('Input and output buffers must be different');
+
+  this._out = out;
+  this._data = data;
+  this._inv = 0;
+  this._transform4();
+  this._out = null;
+  this._data = null;
+};
+
+FFT.prototype.realTransform = function realTransform(out, data) {
+  if (out === data)
+    throw new Error('Input and output buffers must be different');
+
+  this._out = out;
+  this._data = data;
+  this._inv = 0;
+  this._realTransform4();
+  this._out = null;
+  this._data = null;
+};
+
+FFT.prototype.inverseTransform = function inverseTransform(out, data) {
+  if (out === data)
+    throw new Error('Input and output buffers must be different');
+
+  this._out = out;
+  this._data = data;
+  this._inv = 1;
+  this._transform4();
+  for (var i = 0; i < out.length; i++)
+    out[i] /= this.size;
+  this._out = null;
+  this._data = null;
+};
+
+// radix-4 implementation
+//
+// NOTE: Uses of `var` are intentional for older V8 version that do not
+// support both `let compound assignments` and `const phi`
+FFT.prototype._transform4 = function _transform4() {
+  var out = this._out;
+  var size = this._csize;
+
+  // Initial step (permute and transform)
+  var width = this._width;
+  var step = 1 << width;
+  var len = (size / step) << 1;
+
+  var outOff;
+  var t;
+  var bitrev = this._bitrev;
+  if (len === 4) {
+    for (outOff = 0, t = 0; outOff < size; outOff += len, t++) {
+      const off = bitrev[t];
+      this._singleTransform2(outOff, off, step);
+    }
+  } else {
+    // len === 8
+    for (outOff = 0, t = 0; outOff < size; outOff += len, t++) {
+      const off = bitrev[t];
+      this._singleTransform4(outOff, off, step);
+    }
+  }
+
+  // Loop through steps in decreasing order
+  var inv = this._inv ? -1 : 1;
+  var table = this.table;
+  for (step >>= 2; step >= 2; step >>= 2) {
+    len = (size / step) << 1;
+    var quarterLen = len >>> 2;
+
+    // Loop through offsets in the data
+    for (outOff = 0; outOff < size; outOff += len) {
+      // Full case
+      var limit = outOff + quarterLen;
+      for (var i = outOff, k = 0; i < limit; i += 2, k += step) {
+        const A = i;
+        const B = A + quarterLen;
+        const C = B + quarterLen;
+        const D = C + quarterLen;
+
+        // Original values
+        const Ar = out[A];
+        const Ai = out[A + 1];
+        const Br = out[B];
+        const Bi = out[B + 1];
+        const Cr = out[C];
+        const Ci = out[C + 1];
+        const Dr = out[D];
+        const Di = out[D + 1];
+
+        // Middle values
+        const MAr = Ar;
+        const MAi = Ai;
+
+        const tableBr = table[k];
+        const tableBi = inv * table[k + 1];
+        const MBr = Br * tableBr - Bi * tableBi;
+        const MBi = Br * tableBi + Bi * tableBr;
+
+        const tableCr = table[2 * k];
+        const tableCi = inv * table[2 * k + 1];
+        const MCr = Cr * tableCr - Ci * tableCi;
+        const MCi = Cr * tableCi + Ci * tableCr;
+
+        const tableDr = table[3 * k];
+        const tableDi = inv * table[3 * k + 1];
+        const MDr = Dr * tableDr - Di * tableDi;
+        const MDi = Dr * tableDi + Di * tableDr;
+
+        // Pre-Final values
+        const T0r = MAr + MCr;
+        const T0i = MAi + MCi;
+        const T1r = MAr - MCr;
+        const T1i = MAi - MCi;
+        const T2r = MBr + MDr;
+        const T2i = MBi + MDi;
+        const T3r = inv * (MBr - MDr);
+        const T3i = inv * (MBi - MDi);
+
+        // Final values
+        const FAr = T0r + T2r;
+        const FAi = T0i + T2i;
+
+        const FCr = T0r - T2r;
+        const FCi = T0i - T2i;
+
+        const FBr = T1r + T3i;
+        const FBi = T1i - T3r;
+
+        const FDr = T1r - T3i;
+        const FDi = T1i + T3r;
+
+        out[A] = FAr;
+        out[A + 1] = FAi;
+        out[B] = FBr;
+        out[B + 1] = FBi;
+        out[C] = FCr;
+        out[C + 1] = FCi;
+        out[D] = FDr;
+        out[D + 1] = FDi;
+      }
+    }
+  }
+};
+
+// radix-2 implementation
+//
+// NOTE: Only called for len=4
+FFT.prototype._singleTransform2 = function _singleTransform2(outOff, off,
+                                                             step) {
+  const out = this._out;
+  const data = this._data;
+
+  const evenR = data[off];
+  const evenI = data[off + 1];
+  const oddR = data[off + step];
+  const oddI = data[off + step + 1];
+
+  const leftR = evenR + oddR;
+  const leftI = evenI + oddI;
+  const rightR = evenR - oddR;
+  const rightI = evenI - oddI;
+
+  out[outOff] = leftR;
+  out[outOff + 1] = leftI;
+  out[outOff + 2] = rightR;
+  out[outOff + 3] = rightI;
+};
+
+// radix-4
+//
+// NOTE: Only called for len=8
+FFT.prototype._singleTransform4 = function _singleTransform4(outOff, off,
+                                                             step) {
+  const out = this._out;
+  const data = this._data;
+  const inv = this._inv ? -1 : 1;
+  const step2 = step * 2;
+  const step3 = step * 3;
+
+  // Original values
+  const Ar = data[off];
+  const Ai = data[off + 1];
+  const Br = data[off + step];
+  const Bi = data[off + step + 1];
+  const Cr = data[off + step2];
+  const Ci = data[off + step2 + 1];
+  const Dr = data[off + step3];
+  const Di = data[off + step3 + 1];
+
+  // Pre-Final values
+  const T0r = Ar + Cr;
+  const T0i = Ai + Ci;
+  const T1r = Ar - Cr;
+  const T1i = Ai - Ci;
+  const T2r = Br + Dr;
+  const T2i = Bi + Di;
+  const T3r = inv * (Br - Dr);
+  const T3i = inv * (Bi - Di);
+
+  // Final values
+  const FAr = T0r + T2r;
+  const FAi = T0i + T2i;
+
+  const FBr = T1r + T3i;
+  const FBi = T1i - T3r;
+
+  const FCr = T0r - T2r;
+  const FCi = T0i - T2i;
+
+  const FDr = T1r - T3i;
+  const FDi = T1i + T3r;
+
+  out[outOff] = FAr;
+  out[outOff + 1] = FAi;
+  out[outOff + 2] = FBr;
+  out[outOff + 3] = FBi;
+  out[outOff + 4] = FCr;
+  out[outOff + 5] = FCi;
+  out[outOff + 6] = FDr;
+  out[outOff + 7] = FDi;
+};
+
+// Real input radix-4 implementation
+FFT.prototype._realTransform4 = function _realTransform4() {
+  var out = this._out;
+  var size = this._csize;
+
+  // Initial step (permute and transform)
+  var width = this._width;
+  var step = 1 << width;
+  var len = (size / step) << 1;
+
+  var outOff;
+  var t;
+  var bitrev = this._bitrev;
+  if (len === 4) {
+    for (outOff = 0, t = 0; outOff < size; outOff += len, t++) {
+      const off = bitrev[t];
+      this._singleRealTransform2(outOff, off >>> 1, step >>> 1);
+    }
+  } else {
+    // len === 8
+    for (outOff = 0, t = 0; outOff < size; outOff += len, t++) {
+      const off = bitrev[t];
+      this._singleRealTransform4(outOff, off >>> 1, step >>> 1);
+    }
+  }
+
+  // Loop through steps in decreasing order
+  var inv = this._inv ? -1 : 1;
+  var table = this.table;
+  for (step >>= 2; step >= 2; step >>= 2) {
+    len = (size / step) << 1;
+    var halfLen = len >>> 1;
+    var quarterLen = halfLen >>> 1;
+    var hquarterLen = quarterLen >>> 1;
+
+    // Loop through offsets in the data
+    for (outOff = 0; outOff < size; outOff += len) {
+      for (var i = 0, k = 0; i <= hquarterLen; i += 2, k += step) {
+        var A = outOff + i;
+        var B = A + quarterLen;
+        var C = B + quarterLen;
+        var D = C + quarterLen;
+
+        // Original values
+        var Ar = out[A];
+        var Ai = out[A + 1];
+        var Br = out[B];
+        var Bi = out[B + 1];
+        var Cr = out[C];
+        var Ci = out[C + 1];
+        var Dr = out[D];
+        var Di = out[D + 1];
+
+        // Middle values
+        var MAr = Ar;
+        var MAi = Ai;
+
+        var tableBr = table[k];
+        var tableBi = inv * table[k + 1];
+        var MBr = Br * tableBr - Bi * tableBi;
+        var MBi = Br * tableBi + Bi * tableBr;
+
+        var tableCr = table[2 * k];
+        var tableCi = inv * table[2 * k + 1];
+        var MCr = Cr * tableCr - Ci * tableCi;
+        var MCi = Cr * tableCi + Ci * tableCr;
+
+        var tableDr = table[3 * k];
+        var tableDi = inv * table[3 * k + 1];
+        var MDr = Dr * tableDr - Di * tableDi;
+        var MDi = Dr * tableDi + Di * tableDr;
+
+        // Pre-Final values
+        var T0r = MAr + MCr;
+        var T0i = MAi + MCi;
+        var T1r = MAr - MCr;
+        var T1i = MAi - MCi;
+        var T2r = MBr + MDr;
+        var T2i = MBi + MDi;
+        var T3r = inv * (MBr - MDr);
+        var T3i = inv * (MBi - MDi);
+
+        // Final values
+        var FAr = T0r + T2r;
+        var FAi = T0i + T2i;
+
+        var FBr = T1r + T3i;
+        var FBi = T1i - T3r;
+
+        out[A] = FAr;
+        out[A + 1] = FAi;
+        out[B] = FBr;
+        out[B + 1] = FBi;
+
+        // Output final middle point
+        if (i === 0) {
+          var FCr = T0r - T2r;
+          var FCi = T0i - T2i;
+          out[C] = FCr;
+          out[C + 1] = FCi;
+          continue;
+        }
+
+        // Do not overwrite ourselves
+        if (i === hquarterLen)
+          continue;
+
+        // In the flipped case:
+        // MAi = -MAi
+        // MBr=-MBi, MBi=-MBr
+        // MCr=-MCr
+        // MDr=MDi, MDi=MDr
+        var ST0r = T1r;
+        var ST0i = -T1i;
+        var ST1r = T0r;
+        var ST1i = -T0i;
+        var ST2r = -inv * T3i;
+        var ST2i = -inv * T3r;
+        var ST3r = -inv * T2i;
+        var ST3i = -inv * T2r;
+
+        var SFAr = ST0r + ST2r;
+        var SFAi = ST0i + ST2i;
+
+        var SFBr = ST1r + ST3i;
+        var SFBi = ST1i - ST3r;
+
+        var SA = outOff + quarterLen - i;
+        var SB = outOff + halfLen - i;
+
+        out[SA] = SFAr;
+        out[SA + 1] = SFAi;
+        out[SB] = SFBr;
+        out[SB + 1] = SFBi;
+      }
+    }
+  }
+};
+
+// radix-2 implementation
+//
+// NOTE: Only called for len=4
+FFT.prototype._singleRealTransform2 = function _singleRealTransform2(outOff,
+                                                                     off,
+                                                                     step) {
+  const out = this._out;
+  const data = this._data;
+
+  const evenR = data[off];
+  const oddR = data[off + step];
+
+  const leftR = evenR + oddR;
+  const rightR = evenR - oddR;
+
+  out[outOff] = leftR;
+  out[outOff + 1] = 0;
+  out[outOff + 2] = rightR;
+  out[outOff + 3] = 0;
+};
+
+// radix-4
+//
+// NOTE: Only called for len=8
+FFT.prototype._singleRealTransform4 = function _singleRealTransform4(outOff,
+                                                                     off,
+                                                                     step) {
+  const out = this._out;
+  const data = this._data;
+  const inv = this._inv ? -1 : 1;
+  const step2 = step * 2;
+  const step3 = step * 3;
+
+  // Original values
+  const Ar = data[off];
+  const Br = data[off + step];
+  const Cr = data[off + step2];
+  const Dr = data[off + step3];
+
+  // Pre-Final values
+  const T0r = Ar + Cr;
+  const T1r = Ar - Cr;
+  const T2r = Br + Dr;
+  const T3r = inv * (Br - Dr);
+
+  // Final values
+  const FAr = T0r + T2r;
+
+  const FBr = T1r;
+  const FBi = -T3r;
+
+  const FCr = T0r - T2r;
+
+  const FDr = T1r;
+  const FDi = T3r;
+
+  out[outOff] = FAr;
+  out[outOff + 1] = 0;
+  out[outOff + 2] = FBr;
+  out[outOff + 3] = FBi;
+  out[outOff + 4] = FCr;
+  out[outOff + 5] = 0;
+  out[outOff + 6] = FDr;
+  out[outOff + 7] = FDi;
+};
+
+// ****
+
+
 "use strict";
 
 // note: the surprising behaviour of the AudioContext.
@@ -8,10 +522,252 @@
 window.AudioContext = window.AudioContext || window.webkitAudioContext;
 var context = new AudioContext();
 
+
+function sqr(x) { return x * x; }
+
+
+/** Returns an array with the von-Hann window
+ */
+function hannDistribution(width) {
+
+  let buffer = new Float32Array(width);
+  for (let i = 0; i < width; i++ ) {
+    buffer[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / width - 1));
+  }
+
+  return buffer;
+}
+
+
+
+/** Returns an array with the normal distribution.
+ */
+function normDistribution(omega) {
+
+  const halfWidth = omega * 2;
+  const width = omega * 4 + 1;
+
+  let buffer = new Float32Array(width);
+  for (let i = 0; i < width; i++ ) {
+    buffer[i] = (1.0 / Math.sqrt(2.0 * Math.PI * sqr(omega))) *
+      Math.exp(-0.5 * sqr((i - halfWidth) / omega));
+  }
+
+  return buffer;
+}
+
+
+/** Returns an array with a filter of the given width.
+ */
+function flatFilter(width) {
+
+  let buffer = new Float32Array(width);
+  for (let i = 0; i < width; i++ ) {
+    buffer[i] = 1.0 / width;
+  }
+
+  return buffer;
+}
+
+
+
+/** Applys a convolution filter to the input buffer.
+ *
+ *  @param bufferIn An array with the audio samples.
+ *  @param filter An array with the filter like returned by normDistribution
+ */
+function filter(bufferIn, filter) {
+
+  let bufferOut = new Float32Array(bufferIn.length);
+  for (let i = 0; i < bufferOut.length; i++) {
+    bufferOut[i] = 0.0;
+  }
+
+  for (let i = 0; i < bufferIn.length; i++) {
+    for (let j = 0; j < filter.length; j++) {
+      let iI = i + j - Math.ceil(filter.length / 2);
+      if (iI < 0) {
+        iI = 0;
+      } if (iI >= bufferIn.length) {
+        iI = bufferIn.length - 1;
+      }
+      bufferOut[i] += bufferIn[iI] * filter[j];
+    }
+  }
+
+  return bufferOut;
+}
+
+
+/** Applys a convolution low pass filter to the input buffer.
+ *
+ *  @param bufferIn An array with the audio samples.
+ *  @param omega The width of the norm distribution used as filter.
+ */
+function filterLowpass(bufferIn, omega=5) {
+  const filter = normDistribution(omega)
+
+  let bufferOut = new Float32Array(bufferIn.length);
+  for (let i = 0; i < bufferOut.length; i++) {
+    bufferOut[i] = 0.0;
+  }
+
+  for (let i = 0; i < bufferIn.length; i++) {
+    for (let j = 0; j < filter.length; j++) {
+      let iI = i + j - Math.ceil(filter.length / 2);
+      if (iI < 0) {
+        iI = 0;
+      } if (iI >= bufferIn.length) {
+        iI = bufferIn.length - 1;
+      }
+      bufferOut[i] += bufferIn[iI] * filter[j];
+    }
+  }
+
+  return bufferOut;
+}
+
+
+/** Returns an array of the positions in the input buffer
+ *  where the values go from negative to positive.
+ *
+ *  @param bufferIn An array with the audio samples.
+ */
+function zeroCrossings(bufferIn) {
+  let positions = [0];
+  for (let i = 1; i < bufferIn.length; i++) {
+    if (bufferIn[i - 1] < 0 && bufferIn[i] >= 0) {
+      positions.push(i);
+    }
+  }
+  positions.push(bufferIn.length - 1);
+
+  return positions;
+}
+
+
+/** Returns an array of the positions in the input buffer
+ *  where the first derivative changes it's sign
+ *
+ *  @param bufferIn An array with the audio samples.
+ */
+function localMinima(bufferIn) {
+  let positions = [0];
+  for (let i = 1; i < bufferIn.length - 1; i++) {
+    const diff1 = bufferIn[i - 1] - bufferIn[i];
+    const diff2 = bufferIn[i] - bufferIn[i + 1];
+    if (diff1 < 0 && diff2 >= 0) {
+      positions.push(i);
+    }
+  }
+  positions.push(bufferIn.length - 1);
+
+  return positions;
+}
+
+
+/** Returns an array of the positions in the input buffer
+ *  where the first derivative changes it's sign
+ *
+ *  @param bufferIn An array with the audio samples.
+ */
+function localMaxima(bufferIn) {
+  let positions = [0];
+  for (let i = 1; i < bufferIn.length - 1; i++) {
+    const diff1 = bufferIn[i - 1] - bufferIn[i];
+    const diff2 = bufferIn[i] - bufferIn[i + 1];
+    if (diff1 > 0 && diff2 <= 0) {
+      positions.push(i);
+    }
+  }
+  positions.push(bufferIn.length - 1);
+
+  return positions;
+}
+
+
+/** Returns an array of block lengths
+ *  
+ *
+ *  @param positions An array of positions
+ */
+function positionsToLengths(positions) {
+  let lengths = [];
+  for (let i = 1; i < positions.length; i++) {
+    lengths.push(positions[i] - positions[i - 1]);
+  }
+
+  return lengths;
+}
+
+
+/** Returns an array of block lengths
+ *  
+ *
+ *  @param positions An array of positions
+ */
+function lengthsToPositions(lengths) {
+  let pos = 0;
+  let positions = [0];
+  for (let i = 0; i < lengths.length; i++) {
+    pos += lengths[i];
+    positions.push(pos);
+  }
+
+  return positions;
+}
+
+
+/** Cleans up the positions.
+ *
+ *  Since we can't split too large blocks, we
+ *  are merging blocks that are below minimum
+ *  length.
+ *
+ *  Keeps the first and the last position.
+ *
+ *  @param positionsIn An array of positions. Sorted ascending. Must have at least one position
+ *  @param minDist The minimum difference between the positions
+ */
+function cleanUpPositions(positionsIn, minDist) {
+  let positionsOut = [positionsIn[0]];
+
+  for (let i = 1; i < positionsIn.length - 1; i++) {
+    if (positionsIn[i] - positionsOut[positionsOut.length - 1] >= minDist) {
+      positionsOut.push(positionsIn[i]);
+    }
+  }
+
+  positionsOut.push(positionsIn[positionsIn.length - 1])
+  return positionsOut;
+}
+
+
+/** Keep only evere n-th position.
+ *
+ *  Keeps the first and the last position.
+ *
+ *  @param positionsIn An array of positions. Sorted ascending.
+ *  @param nth
+ */
+function keepNthPositions(positionsIn, nth) {
+  let positionsOut = [];
+
+  for (let i = 0; i < positionsIn.length - 2; i += nth) {
+    positionsOut.push(positionsIn[i]);
+  }
+
+  positionsOut.push(positionsIn[positionsIn.length - 1])
+  return positionsOut;
+}
+
 /** Class for keeping track of an audio block.
  *
  *  This is a segment from the original audio buffer
  *  with start, end, volume and RMP information.
+ *
+ *  The idea is that this sample represents one revolution
+ *  of the engine.
  */
 class AudioBlock {
   buffer = null; ///< float 32 array (-1..1) with full audio data
@@ -41,7 +797,32 @@ class AudioBlock {
   get rpm() {
     return 60.0 * this.sampleRate / (this.sampleEnd - this.sampleStart);
   }
+
+  /** A quality meassure of this block.
+   *
+   *  A float value, representing the quality of a block. Higher is better.
+   *  Blocks with uncertain RPM, noise or in positions with strange fluctiations
+   *  should get lower values.
+  get quality() {
+    // For now we just say that blocks in the middle of the audio are better.
+    const quality = - Math.abs(this.buffer.length - this.sampleStart - this.sampleEnd)
+    return quality;
+  }
+
+  /** Adds the audio block with the given RPM to the buffer.
+   *
+   *  @param buffer An array containing the audio samples.
+   *  @param rpm The target RPM of the added engine sample.
+   */
+  addBlock(buffer, rpm) {
+      const factor = this.rpm / rpm;
+      const newLength = Math.round((this.sampleEnd - this.sampleStart) * factor);
+      for (let i = 0; i < newLength; i++) {
+          buffer.push(this.buffer[Math.round(this.sampleStart + i / factor)])
+      }
+  }
 }
+
 
 /** Class for handling an EngineRampSound.
  *
@@ -57,9 +838,9 @@ class EngineRampSound {
 
   blocks = []; ///< an array of AudioBlock objects
 
-  rpmMin = 1000; ///< min rpm used for sound blocks
-  rpmMax = 2000; ///< max rpm used for sound blocks
-  rpmStep = 5;
+  rpmMin = 900; ///< min rpm used for sound blocks
+  rpmMax = 2100; ///< max rpm used for sound blocks
+  rpmStep = 80;
 
   /** An array of block objects, for the range of RPMs */
   accelBlocks = new Array(Math.ceil((this.rpmMax - this.rpmMin) / this.rpmStep));
@@ -87,12 +868,17 @@ class EngineRampSound {
     this.noCylinders = noCylinders;
     this.sampleRate = audioBuffer.length / audioBuffer.duration;
 
+    const rpmMaxCleanup = 3000;
+ 
+    // minimum position distance for zero crossings
+    // const minDist = this.sampleRate / (rpmMaxCleanup / 60) / this.noCylinders;
+
     // split up the audio into blocks
     const positions = keepNthPositions(
-      cleanUpPositions(
-        zeroCrossings(
-          filterLowpass(this.buffer, 20)), 100),
-      noCylinders);
+            zeroCrossings(
+              filter(this.buffer, normDistribution(15))
+            ),
+       noCylinders);
 
     this.blocks = [];
     for (let i = 0; i < positions.length - 1; i++) {
@@ -101,8 +887,9 @@ class EngineRampSound {
     }
 
     // pick suitable accel and deccel blocks
-    for (let i = 0; i < this.blocks.length; i++) {
+    for (let i = 50; i < this.blocks.length - 50; i++) {
       const rpm = this.blocks[i].rpm;
+      // todo: use indexForRpm usefully
       const pos = Math.round((rpm - this.rpmMin) / this.rpmStep);
       if ((pos < 0) || pos >= this.accelBlocks.length) {
         continue;
@@ -120,14 +907,252 @@ class EngineRampSound {
       }
 
       if ((rpmPrev <= rpm) && (rpm < rpmNext)) {
-        this.accelBlocks[pos] = i;
+        if (this.accelBlocks[pos] == null ||
+            this.accelBlocks[pos].quality < this.blocks[i].quality) {
+          this.accelBlocks[pos] = this.blocks[i];
+        }
       } else if ((rpmPrev >= rpm) && (rpm > rpmNext)) {
-        this.deccelBlocks[pos] = i;
+        if (this.deccelBlocks[pos] == null ||
+            this.deccelBlocks[pos].quality < this.blocks[i].quality) {
+          this.deccelBlocks[pos] = this.blocks[i];
+        }
       } else {
         // ignore this block
       }
     }
+
+    EngineRampSound.fillOutBlocks(this.accelBlocks);
+    EngineRampSound.fillOutBlocks(this.deccelBlocks);
   }
+
+  /** Goes through the given list and fills out the one with null
+   *  with the nearest ones.
+   *
+   *  @param blocksList An array of blocks and "null"
+   */
+  static fillOutBlocks(blocksList) {
+
+    // array, set to true if a block was newly filled
+    let newFilled = new Array(blocksList.length);
+
+    for (let i = 0; i < blocksList.length; i++) {
+      if (blocksList[i] != null) {
+         continue;
+      }
+      console.log("missing block " + i.toString());
+      // try to find a block next to the one we want to fill out
+      for (let delta = 1; delta < blocksList.length; delta++) {
+        if (i - delta >= 0 &&
+            !newFilled[i - delta] &&
+            blocksList[i - delta]) {
+           blocksList[i] = blocksList[i - delta];
+           newFilled[i] = true;
+           break;
+        }
+        if (i + delta < blocksList.length &&
+            !newFilled[i + delta] &&
+            blocksList[i + delta]) {
+           blocksList[i] = blocksList[i + delta];
+           newFilled[i] = true;
+           break;
+        }
+      }
+    }
+  }
+
+  /** draws an array of rpms determined by an fft
+   */
+  drawRpms(canvas, spacing, height, width) {
+
+    const fftSize = 4096 * 1;
+    const hannWindow = hannDistribution(fftSize);
+
+    const maxBucket = 150;
+    const rpmCutoff = 2600;
+    const f = new FFT(fftSize);
+    const complexOut = f.createComplexArray();
+    const magnitudes = new Array(fftSize / 2);
+    for (let i = 0; i < this.buffer.length; i += fftSize) {
+      
+      // compute blockwise fft
+      const realInput = new Array(f.size);
+      for (let j = 0; j < fftSize; j++) {
+        realInput[j] = this.buffer[i + j] * hannWindow[j];
+      }
+      f.realTransform(complexOut, realInput);
+      // compute signal magnitudes (actually the squared one)
+      for (let j = 0; j < fftSize; j += 2) {
+        magnitudes[j / 2] = Math.sqrt(sqr(complexOut[j]) + sqr(complexOut[j+1]));
+      }
+
+      canvas.lineWidth = 2;
+      for (let j = 0; j < maxBucket; j++) {
+          const xPos = spacing +
+             (i / this.buffer.length) * (width - spacing * 2);
+          const yPos = height -
+            (spacing + j / (maxBucket) * (height - spacing * 2));
+
+          canvas.beginPath();
+          let color = `rgb(
+              255,
+              ${Math.floor(255 - (magnitudes[j] * 1))},
+              ${Math.floor(255 - (magnitudes[j] * 2))})`
+          canvas.strokeStyle = color;
+          canvas.moveTo(xPos, yPos);
+          canvas.lineTo(xPos + 2, yPos);
+          canvas.stroke();
+      }
+    }
+  }
+
+
+  /** Returns an array of rpms determined by an fft
+   */
+  get rpms() {
+    let rpms = [];
+    const fftSize = 4096 * 2;
+
+    const hannWindow = hannDistribution(fftSize);
+
+    const f = new FFT(fftSize);
+    const complexOut = f.createComplexArray();
+    const magnitudes = new Array(fftSize / 2);
+    let lastBestBucket = 1;
+    for (let i = 0; i < this.buffer.length; i += fftSize / 4) {
+      
+      // compute blockwise fft
+      const realInput = new Array(f.size);
+      for (let j = 0; j < fftSize; j++) {
+        if (i + j - (fftSize / 2) < 0) {
+          realInput[j] = 0;
+        } else if (i + j - (fftSize / 2) >= this.buffer.length) {
+          realInput[j] = 0;
+        } else {
+          realInput[j] = this.buffer[i + j - (fftSize / 2)] * hannWindow[j];
+        }
+      }
+      f.realTransform(complexOut, realInput);
+      // compute signal magnitudes (actually the squared one)
+      for (let j = 0; j < fftSize; j += 2) {
+        magnitudes[j / 2] = Math.sqrt(sqr(complexOut[j]) + sqr(complexOut[j+1]));
+      }
+
+      // find bucket with the highest energy
+      let bestBucket = 1;
+      let power = 0;
+      for (let j = 1; j < magnitudes.length / 2; j++) {
+        if (magnitudes[j] > power) {
+          bestBucket = j;
+          power = magnitudes[j];
+        }
+      }
+
+      // check if we might have been misslead by a harmonic
+      if (Math.abs(lastBestBucket - bestBucket) > 5) {
+        if (magnitudes[lastBestBucket] > (magnitudes[bestBucket] * 0.75)) {
+          bestBucket = lastBestBucket;
+        }
+      }
+      lastBestBucket = bestBucket;
+
+      // parabolic interpolation.
+      // see https://mgasior.web.cern.ch/pap/FFT_resol_note.pdf
+      bestBucket += (magnitudes[bestBucket + 1] - magnitudes[bestBucket - 1]) /
+        (2.0 * (2.0 * magnitudes[bestBucket] - magnitudes[bestBucket + 1] - magnitudes[bestBucket - 1]));
+
+      const freq = bestBucket * this.sampleRate / fftSize;
+      let rpm = freq / this.noCylinders * 60;
+       
+      rpms.push(rpm);
+    }
+
+    return rpms;
+  }
+
+
+  /** Returns an index into the accelBlocks or deccelBlocks array for
+   *  the given rpm.
+   */
+  indexForRpm(rpm) {
+    const pos = Math.round((rpm - this.rpmMin) / this.rpmStep);
+    if (pos < 0) {
+      return 0;
+    }
+    if (pos >= this.accelBlocks.length) {
+       return this.accelBlocks.length - 1;
+    }
+    return pos
+  }
+
+
+  /** Return the AudioBlock at the given position.
+   */
+  blockAt(samplePos) {
+    return this.blocks.find((x) => (samplePos <= x.sampleStart));
+  }
+
+
+  /** Adds the audio block with the given RPM to the buffer.
+   *
+   *  @param buffer An array containing the audio samples.
+   *  @param rpm The target RPM of the added engine sample.
+   *  @param accel True if the sample should be added from the accelBlocks
+   *    False if it should be from the deccel blocks.
+   */
+  addBlock(buffer, rpm, accel) {
+      const index = this.indexForRpm(rpm);
+      let outBlock = null;
+      if (accel) {
+        outBlock = this.accelBlocks[index];
+      } else {
+        outBlock = this.deccelBlocks[index];
+      }
+      outBlock.addBlock(buffer, rpm);
+  }
+
+
+  /** Synthesizes an engine sound using the accel and deccel blocks.
+   *  We just put accel and deccel blocks together.
+   *
+   *  @returns An array of float value.
+   */
+  synthesizeSynthetic() {
+    let outBuffer = [];
+
+    for (let rpm = 900; rpm < 2200; rpm += 10) {
+      this.addBlock(outBuffer, rpm, true);
+    }
+    for (let rpm = 2200; rpm > 900; rpm -= 10) {
+      this.addBlock(outBuffer, rpm, false);
+    }
+
+    return outBuffer;
+  }
+
+  /** Synthesizes an engine sound using the accel and deccel blocks.
+   *
+   *  @param engineSound An EngineRampSound object.
+   *  @returns An array of float value.
+   */
+  synthesizeAudio(engineSound) {
+    const inBuffer = engineSound.buffer;
+    let outBuffer = [];
+    let lastRpm = 0;
+
+    while (outBuffer.length < inBuffer.length) {
+      const inBlock = engineSound.blockAt(outBuffer.length);
+      if (!inBlock) {
+        break;
+      }
+      const rpm = inBlock.rpm;
+      const volume = inBlock.volume;
+
+      this.addBlock(outBuffer, rpm, rpm > lastRpm);
+      lastRpm = rpm;
+    }
+    return outBuffer;
+  }
+
 };
 
 
@@ -247,168 +1272,6 @@ function newFileSelected(event)
   // fr.inputFileName = event.target.files[0];
   fr.onload = headerFileLoaded;  // onload fires after reading is complete
   fr.readAsText(event.target.files[0]);
-}
-
-function sqr(x) { return x * x; }
-
-/** Returns an array with the normal distribution.
- */
-function normDistribution(omega) {
-
-  const halfWidth = omega * 2;
-  const width = omega * 4 + 1;
-
-  let buffer = new Float32Array(width);
-  for (let i = 0; i < width; i++ ) {
-    buffer[i] = (1.0 / Math.sqrt(2.0 * Math.PI * sqr(omega))) *
-      Math.exp(-0.5 * sqr((i - halfWidth) / omega))
-  }
-
-  return buffer;
-}
-
-
-/** Applys a convolution low pass filter to the input buffer.
- *
- *  @param bufferIn An array with the audio samples.
- *  @param omega The width of the norm distribution used as filter.
- */
-function filterLowpass(bufferIn, omega=5) {
-  const filter = normDistribution(omega)
-
-  let bufferOut = new Float32Array(bufferIn.length);
-  for (let i = 0; i < bufferOut.length; i++) {
-    bufferOut[i] = 0.0;
-  }
-
-  for (let i = 0; i < bufferIn.length; i++) {
-    for (let j = 0; j < filter.length; j++) {
-      let iI = i + j - Math.ceil(filter.length / 2);
-      if (iI < 0) {
-        iI = 0;
-      } if (iI >= bufferIn.length) {
-        iI = bufferIn.length - 1;
-      }
-      bufferOut[i] += bufferIn[iI] * filter[j];
-    }
-  }
-
-  return bufferOut;
-}
-
-
-/** Returns an array of the positions in the input buffer
- *  where the values go from negative to positive.
- *
- *  @param bufferIn An array with the audio samples.
- */
-function zeroCrossings(bufferIn) {
-  let positions = [0];
-  for (let i = 1; i < bufferIn.length; i++) {
-    if (bufferIn[i - 1] < 0 && bufferIn[i] >= 0) {
-      positions.push(i);
-    }
-  }
-  positions.push(bufferIn.length - 1);
-
-  return positions;
-}
-
-
-/** Returns an array of the positions in the input buffer
- *  where the first derivative changes it's sign
- *
- *  @param bufferIn An array with the audio samples.
- */
-function localMinima(bufferIn) {
-  let positions = [0];
-  for (let i = 1; i < bufferIn.length - 1; i++) {
-    const diff1 = bufferIn[i - 1] - bufferIn[i];
-    const diff2 = bufferIn[i] - bufferIn[i + 1];
-    if (diff1 < 0 && diff2 >= 0) {
-      positions.push(i);
-    }
-  }
-  positions.push(bufferIn.length - 1);
-
-  return positions;
-}
-
-
-/** Cleans up the positions.
- *
- *  Since we can't split too large blocks, we
- *  are merging blocks that are below minimum
- *  length.
- *
- *  Keeps the first and the last position.
- *
- *  @param positionsIn An array of positions. Sorted ascending. Must have at least one position
- *  @param minDist The minimum difference between the positions
- */
-function cleanUpPositions(positionsIn, minDist) {
-  let positionsOut = [positionsIn[0]];
-
-  for (let i = 1; i < positionsIn.length - 1; i++) {
-    if (positionsIn[i] - positionsOut[positionsOut.length - 1] >= minDist) {
-      positionsOut.push(positionsIn[i]);
-    }
-  }
-
-  positionsOut.push(positionsIn[positionsIn.length - 1])
-  return positionsOut;
-}
-
-
-/** Keep only evere n-th position.
- *
- *  Keeps the first and the last position.
- *
- *  @param positionsIn An array of positions. Sorted ascending.
- *  @param nth
- */
-function keepNthPositions(positionsIn, nth) {
-  let positionsOut = [];
-
-  for (let i = 0; i < positionsIn.length - 2; i += nth) {
-    positionsOut.push(positionsIn[i]);
-  }
-
-  positionsOut.push(positionsIn[positionsIn.length - 1])
-  return positionsOut;
-}
-
-
-/** Calculates the volume of the blocks.
- */
-function calcVolumeBlock(positions, buffer) {
-  let volumes = [];
-
-  for (let i = 0; i < positions.length - 1; i++) {
-    let minValue = 0;
-    let maxValue = 0;
-    for (let j = positions[i]; j < positions[i + 1]; j++) {
-      maxValue = Math.max(maxValue, buffer[j]);
-      minValue = Math.min(minValue, buffer[j]);
-    }
-    volumes.push(maxValue - minValue);
-  }
-
-  return volumes;
-}
-
-
-/** Calculates the rpms of the blocks.
- */
-function calcRpmBlock(positions, samplerate) {
-  let rpms = [];
-
-  for (let i = 1; i < positions.length; i++) {
-    const rpm = 60.0 * samplerate / (positions[i] - positions[i-1]);
-    rpms.push(rpm);
-  }
-
-  return rpms;
 }
 
 
@@ -545,6 +1408,8 @@ function analyzeAudio(audioBuffer, noCylinders)
   canvasCtx.fillRect(0, 0, width, height);
 
   const spacing = 16;
+  engineRampSound.drawRpms(canvasCtx, spacing, height, width);
+
   const fontSize = 10;
   canvasCtx.lineWidth = 2;
   canvasCtx.strokeStyle = "grey";
@@ -578,6 +1443,7 @@ function analyzeAudio(audioBuffer, noCylinders)
   }
 
   // Draw graph volume
+  canvasCtx.lineWidth = 1;
   canvasCtx.beginPath();
   for (let i = 0; i < engineRampSound.blocks.length; i++) {
     const xPos = convX(i);
@@ -610,40 +1476,102 @@ function analyzeAudio(audioBuffer, noCylinders)
   canvasCtx.lineWidth = 1;
   // accel blocks
   for (let i = 0; i < engineRampSound.accelBlocks.length; i++) {
-    if (!engineRampSound.accelBlocks[i]) {
+    if (engineRampSound.accelBlocks[i] == null) {
       continue;
     }
-    const xPos = convX(engineRampSound.accelBlocks[i]);
+    const xPos = spacing +
+       (engineRampSound.accelBlocks[i].sampleStart / noSamples) * (width - spacing * 2);
     canvasCtx.beginPath();
     canvasCtx.moveTo(xPos, height - spacing);
-    canvasCtx.lineTo(xPos, height - spacing * 2);
+    canvasCtx.lineTo(xPos, height - spacing * 1.5);
     canvasCtx.strokeStyle = "red";
     canvasCtx.stroke();
   }
 
   // deccel blocks
   for (let i = 0; i < engineRampSound.deccelBlocks.length; i++) {
-    if (!engineRampSound.deccelBlocks[i]) {
+    if (engineRampSound.deccelBlocks[i] == null) {
       continue;
     }
-    const xPos = convX(engineRampSound.deccelBlocks[i]);
+    const xPos = spacing +
+       (engineRampSound.deccelBlocks[i].sampleStart / noSamples) * (width - spacing * 2);
     canvasCtx.beginPath();
     canvasCtx.moveTo(xPos, height - spacing);
-    canvasCtx.lineTo(xPos, height - spacing * 2);
+    canvasCtx.lineTo(xPos, height - spacing * 1.5);
     canvasCtx.strokeStyle = "blue";
     canvasCtx.stroke();
   }
+
+  // fft rpms
+  const fftRpms = engineRampSound.rpms;
+  canvasCtx.beginPath();
+  for (let i = 0; i < fftRpms.length; i++) {
+    const xPos = spacing +
+       (i / fftRpms.length) * (width - spacing * 2);
+    const yPos = height -
+      (spacing + (fftRpms[i] - minRPM) / (maxRPM - minRPM ) * (height - spacing * 2));
+    if (i === 0) {
+      canvasCtx.moveTo(xPos, yPos);
+    } else {
+      canvasCtx.lineTo(xPos, yPos);
+    }
+  }
+  canvasCtx.strokeStyle = "green";
+  canvasCtx.stroke();
+
+  document.getElementById('inputSynthesize').disabled = false
 }
 
 
-function analyzeFile(file)
-{
+function analyzeFile(file) {
   const noCylinders = document.getElementById("inputCylinders2").valueAsNumber;
 	let audioBuffer = null;
 	let reader = new FileReader();
 	reader.onload = function(){
     context.decodeAudioData(reader.result, function(buffer) {
       analyzeAudio(buffer, noCylinders);
+		}, function(){
+			// error
+		});
+	}
+	reader.readAsArrayBuffer(file);	
+}
+
+
+function synthesizeAudio(audioBuffer, noCylinders)
+{
+  const engineRampSound = new EngineRampSound(audioBuffer, noCylinders);
+  const newBuffer = engineRampSound.synthesizeAudio(engineRampSound);
+  // const newBuffer = engineRampSound.synthesizeSynthetic();
+
+  const blob = new Blob(
+    [toWav(
+        newBuffer,
+        engineRampSound.sampleRate,
+        1)],
+    {type:'audio/wav'});
+  const URLObject = window.webkitURL || window.URL;
+  const url = URLObject.createObjectURL(blob);
+
+  let audio_source = document.querySelector('#audio_source2');
+  audio_source.src = url;
+
+  let audio_control = document.querySelector('#audio_control2');
+  audio_control.pause();
+  audio_control.load();
+  audio_control.oncanplaythrough = audio_control.play();
+}
+
+
+function synthesizeFile(file) {
+
+  const noCylinders = document.getElementById("inputCylinders2").valueAsNumber;
+
+	let audioBuffer = null;
+	let reader = new FileReader();
+	reader.onload = function(){
+    context.decodeAudioData(reader.result, function(buffer) {
+      synthesizeAudio(buffer, noCylinders);
 		}, function(){
 			// error
 		});
@@ -705,7 +1633,7 @@ function analyzeFile(file)
     <br />
     <section
       id="graphSection"
-      style="width: 30vw; height: 10vw;">
+      style="width: 30em; height: 300px;">
       <canvas id="graphCanvas" />
     </section>
 
@@ -713,10 +1641,13 @@ function analyzeFile(file)
     <input id="inputCylinders3" type="number" min="1" max="12" value="10"/>
     <br />
     <input type="button" id="inputSynthesize"
-        onclick="synthesizeFile()"
+        onclick="synthesizeFile(document.getElementById('input_file2').files[0])"
         disabled
         value="Synthesize"/>
     <br />
+    <audio id="audio_control2" controls>
+      <source id="audio_source2" src="" type="audio/wav"/>
+    </audio>
   </fieldset>
 
   <small>
