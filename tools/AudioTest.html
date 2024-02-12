@@ -539,7 +539,6 @@ function hannDistribution(width) {
 }
 
 
-
 /** Returns an array with the normal distribution.
  */
 function normDistribution(omega) {
@@ -568,7 +567,6 @@ function flatFilter(width) {
 
   return buffer;
 }
-
 
 
 /** Applys a convolution filter to the input buffer.
@@ -686,7 +684,7 @@ function localMaxima(bufferIn) {
 }
 
 
-/** Returns an array of block lengths
+/** Returns an array of block lengths for an array of block positions.
  *  
  *
  *  @param positions An array of positions
@@ -701,7 +699,7 @@ function positionsToLengths(positions) {
 }
 
 
-/** Returns an array of block lengths
+/** Returns an array of block positions for an array of block lengths.
  *  
  *
  *  @param positions An array of positions
@@ -718,7 +716,7 @@ function lengthsToPositions(lengths) {
 }
 
 
-/** Cleans up the positions.
+/** Cleans up the positions by removing the ones with not enough lenght.
  *
  *  Since we can't split too large blocks, we
  *  are merging blocks that are below minimum
@@ -743,7 +741,7 @@ function cleanUpPositions(positionsIn, minDist) {
 }
 
 
-/** Keep only evere n-th position.
+/** Keep only every n-th position.
  *
  *  Keeps the first and the last position.
  *
@@ -760,6 +758,7 @@ function keepNthPositions(positionsIn, nth) {
   positionsOut.push(positionsIn[positionsIn.length - 1])
   return positionsOut;
 }
+
 
 /** Class for keeping track of an audio block.
  *
@@ -818,7 +817,9 @@ class AudioBlock {
       const factor = this.rpm / rpm;
       const newLength = Math.round((this.sampleEnd - this.sampleStart) * factor);
       for (let i = 0; i < newLength; i++) {
-          buffer.push(this.buffer[Math.round(this.sampleStart + i / factor)])
+          buffer.push(
+            this.buffer[Math.round(this.sampleStart + (i / factor))]
+          );
       }
   }
 }
@@ -840,13 +841,13 @@ class EngineRampSound {
 
   rpmMin = 900; ///< min rpm used for sound blocks
   rpmMax = 2100; ///< max rpm used for sound blocks
-  rpmStep = 80;
+  rpmStep = 400;
 
   /** An array of block objects, for the range of RPMs */
-  accelBlocks = new Array(Math.ceil((this.rpmMax - this.rpmMin) / this.rpmStep));
+  accelBlocks = [];
 
   /** An array of block objects, for the range of RPMs */
-  deccelBlocks = new Array(Math.ceil((this.rpmMax - this.rpmMin) / this.rpmStep));
+  deccelBlocks = [];
 
   /** Constructs an EngineRampSound
    *
@@ -887,11 +888,14 @@ class EngineRampSound {
     }
 
     // pick suitable accel and deccel blocks
+    let accelBlockSlots = new Array(
+        Math.ceil((this.rpmMax - this.rpmMin) / this.rpmStep));
+    let deccelBlockSlots = new Array(
+        Math.ceil((this.rpmMax - this.rpmMin) / this.rpmStep));
     for (let i = 50; i < this.blocks.length - 50; i++) {
       const rpm = this.blocks[i].rpm;
-      // todo: use indexForRpm usefully
       const pos = Math.round((rpm - this.rpmMin) / this.rpmStep);
-      if ((pos < 0) || pos >= this.accelBlocks.length) {
+      if ((pos < 0) || pos >= accelBlockSlots.length) {
         continue;
       }
 
@@ -907,62 +911,37 @@ class EngineRampSound {
       }
 
       if ((rpmPrev <= rpm) && (rpm < rpmNext)) {
-        if (this.accelBlocks[pos] == null ||
-            this.accelBlocks[pos].quality < this.blocks[i].quality) {
-          this.accelBlocks[pos] = this.blocks[i];
+        if (accelBlockSlots[pos] == null ||
+            accelBlockSlots[pos].quality < this.blocks[i].quality) {
+          accelBlockSlots[pos] = this.blocks[i];
         }
       } else if ((rpmPrev >= rpm) && (rpm > rpmNext)) {
-        if (this.deccelBlocks[pos] == null ||
-            this.deccelBlocks[pos].quality < this.blocks[i].quality) {
-          this.deccelBlocks[pos] = this.blocks[i];
+        if (deccelBlockSlots[pos] == null ||
+            deccelBlockSlots[pos].quality < this.blocks[i].quality) {
+          deccelBlockSlots[pos] = this.blocks[i];
         }
       } else {
         // ignore this block
       }
     }
 
-    EngineRampSound.fillOutBlocks(this.accelBlocks);
-    EngineRampSound.fillOutBlocks(this.deccelBlocks);
-  }
-
-  /** Goes through the given list and fills out the one with null
-   *  with the nearest ones.
-   *
-   *  @param blocksList An array of blocks and "null"
-   */
-  static fillOutBlocks(blocksList) {
-
-    // array, set to true if a block was newly filled
-    let newFilled = new Array(blocksList.length);
-
-    for (let i = 0; i < blocksList.length; i++) {
-      if (blocksList[i] != null) {
-         continue;
+    // now copy the blocks to our original ones.
+    for (let i = 0; i < accelBlockSlots.length; i++) {
+      if (accelBlockSlots[i] != null) {
+        this.accelBlocks.push(accelBlockSlots[i]);
       }
-      console.log("missing block " + i.toString());
-      // try to find a block next to the one we want to fill out
-      for (let delta = 1; delta < blocksList.length; delta++) {
-        if (i - delta >= 0 &&
-            !newFilled[i - delta] &&
-            blocksList[i - delta]) {
-           blocksList[i] = blocksList[i - delta];
-           newFilled[i] = true;
-           break;
-        }
-        if (i + delta < blocksList.length &&
-            !newFilled[i + delta] &&
-            blocksList[i + delta]) {
-           blocksList[i] = blocksList[i + delta];
-           newFilled[i] = true;
-           break;
-        }
+    }
+    for (let i = 0; i < deccelBlockSlots.length; i++) {
+      if (deccelBlockSlots[i] != null) {
+        this.deccelBlocks.push(deccelBlockSlots[i]);
       }
     }
   }
 
+
   /** draws an array of rpms determined by an fft
    */
-  drawRpms(canvas, spacing, height, width) {
+  drawFFT(canvas, spacing, height, width) {
 
     const fftSize = 4096 * 1;
     const hannWindow = hannDistribution(fftSize);
@@ -972,8 +951,18 @@ class EngineRampSound {
     const f = new FFT(fftSize);
     const complexOut = f.createComplexArray();
     const magnitudes = new Array(fftSize / 2);
-    for (let i = 0; i < this.buffer.length; i += fftSize) {
+    for (let xPos = spacing; xPos < width - spacing * 2; xPos += 1) {
+    // for (let i = 0; i < this.buffer.length; i += fftSize) {
       
+      // compute the sample position
+      let i = Math.round((xPos - spacing) / (width - spacing * 2) * this.buffer.length);
+      if (i < 0) {
+        i = 0;
+      }
+      if (i >= this.buffer.length) {
+        i = this.buffer.length;
+      }
+
       // compute blockwise fft
       const realInput = new Array(f.size);
       for (let j = 0; j < fftSize; j++) {
@@ -1069,19 +1058,65 @@ class EngineRampSound {
     return rpms;
   }
 
-
-  /** Returns an index into the accelBlocks or deccelBlocks array for
+  /** Returns two blocks from the accelBlocks or deccelBlocks array for
    *  the given rpm.
+   *  The first block is slightly lower RPM, the second exactly or
+   *  slightly higher.
+   *  It will always return two blocks.
+   *
+   *  @param rpm The target RPM of the added engine sample.
+   *  @param accel True if the blocks are from the accelBlocks
+   *  @returns An array of two AudioBlocks
    */
-  indexForRpm(rpm) {
-    const pos = Math.round((rpm - this.rpmMin) / this.rpmStep);
-    if (pos < 0) {
-      return 0;
+  blocksForRpm(rpm, accel) {
+    let blocks;
+    if (accel) {
+      blocks = this.accelBlocks;
+    } else {
+      blocks = this.deccelBlocks;
     }
-    if (pos >= this.accelBlocks.length) {
-       return this.accelBlocks.length - 1;
-    }
-    return pos
+
+    const minBlock = blocks.reduce(function(prev, curr) {
+      const rpmDiff1 = prev.rpm - rpm;
+      const rpmDiff2 = curr.rpm - rpm;
+      if ((rpmDiff1 > 0) && (rpmDiff2 > 0)) {
+        if (rpmDiff1 < rpmDiff2) {
+          return prev;
+        } else {
+          return curr;
+        }
+      } else if (rpmDiff1 > 0) {
+        return prev;
+      } else if (rpmDiff2 > 0) {
+        return curr;
+      } else if (rpmDiff1 > rpmDiff2) {
+        return prev;
+      } else {
+        return curr;
+      }
+    });
+
+    const maxBlock = blocks.reduce(function(prev, curr) {
+      const rpmDiff1 = rpm - prev.rpm;
+      const rpmDiff2 = rpm - curr.rpm;
+      if ((rpmDiff1 > 0) && (rpmDiff2 > 0)) {
+        if (rpmDiff1 < rpmDiff2) {
+          return prev;
+        } else {
+          return curr;
+        }
+      } else if (rpmDiff1 > 0) {
+        return prev;
+      } else if (rpmDiff2 > 0) {
+        return curr;
+      } else if (rpmDiff1 > rpmDiff2) {
+        return prev;
+      } else {
+        return curr;
+      }
+    });
+
+    return (minBlock, maxBlock);
   }
 
 
@@ -1092,6 +1127,18 @@ class EngineRampSound {
   }
 
 
+  /** Updates the AudioBlock at the given position.
+   *
+   *  If there is already a accel or deccel block at the given position, the
+   *  block is removed.
+   *
+   *  Otherwise a new block from the position is added.
+   */
+  updateBlockAt(samplePos, posEpsilon = 10) {
+    // TODO
+  }
+
+
   /** Adds the audio block with the given RPM to the buffer.
    *
    *  @param buffer An array containing the audio samples.
@@ -1099,31 +1146,39 @@ class EngineRampSound {
    *  @param accel True if the sample should be added from the accelBlocks
    *    False if it should be from the deccel blocks.
    */
-  addBlock(buffer, rpm, accel) {
-      const index = this.indexForRpm(rpm);
-      let outBlock = null;
-      if (accel) {
-        outBlock = this.accelBlocks[index];
-      } else {
-        outBlock = this.deccelBlocks[index];
+  addBlock(buffer, rpm, interpolate, accel) {
+      let outBlocks = this.blocksForRpm(rpm, accel);
+      if (!interpolate) {
+        outBlocks[1] = outBlocks[0];
       }
-      outBlock.addBlock(buffer, rpm);
+
+      let buffer1 = [];
+      outBlocks[0].addBlock(buffer1, rpm);
+      let buffer2 = [];
+      outBlocks[1].addBlock(buffer2, rpm);
+
+      let factor = 0;
+      // mix both buffers together
+      for (let i = 0; i < buffer1.length && i < buffer2.length; i++) {
+        buffer.push(buffer1[i] * factor + buffer2[i] * (1 - factor));
+      }
   }
 
 
   /** Synthesizes an engine sound using the accel and deccel blocks.
    *  We just put accel and deccel blocks together.
    *
+   *  @param interpolate If true, uses two samples mixed together.
    *  @returns An array of float value.
    */
-  synthesizeSynthetic() {
+  synthesizeSynthetic(interpolate = true) {
     let outBuffer = [];
 
     for (let rpm = 900; rpm < 2200; rpm += 10) {
-      this.addBlock(outBuffer, rpm, true);
+      this.addBlock(outBuffer, rpm, interpolate, true);
     }
     for (let rpm = 2200; rpm > 900; rpm -= 10) {
-      this.addBlock(outBuffer, rpm, false);
+      this.addBlock(outBuffer, rpm, interpolate, false);
     }
 
     return outBuffer;
@@ -1154,42 +1209,6 @@ class EngineRampSound {
   }
 
 };
-
-
-/** Decodes a .h file and returns a buffer.
- *
- *  @returns An array with sample rate and the buffer data.
- */
-function headerToArray(headerText) {
-
-  const headerLines = headerText.split("\n");
-
-  // -- find the sample rate:
-  const srRe = /samplerate\s*=\s*(\d+)\s*;/i;
-  let sampleRate = 22050;
-  for (let i = 0; i < headerLines.length; i++) {
-    let results = srRe.exec(headerLines[i]);
-    if (results !== null) {
-      sampleRate = parseInt(sampleRate)
-      break;
-    }
-  }
-
-  // -- find the samples (we assume it_s a line with commas
-  let buffer = [];
-  for (let i = 0; i < headerLines.length; i++) {
-    let numbers = headerLines[i].split(",");
-    if (numbers.length > 1) {
-      // ignore everything after the last comma
-      // might be a comment or a closing }
-      for (let j = 0; j < numbers.length - 1; j++) {
-          buffer.push(parseInt(numbers[j]) / 128.0);
-      }
-    }
-  }
-
-  return [sampleRate, buffer];
-}
 
 
 /** Converts the given text (header/include) file to a wav array.
@@ -1294,104 +1313,12 @@ function addBlock(buffer, positions, block, reverse, newBuffer) {
   }
 }
 
-function processAudio(audioBuffer)
-{
-  // float 32 array (-1..1)
-	let buffer = audioBuffer.getChannelData(0);
-  const origSampleRate = audioBuffer.length / audioBuffer.duration;
 
-  // -- convert to mono if not already
-	if (audioBuffer.numberOfChannels > 1)
-	{
-		for(let c = 1; c < audioBuffer.numberOfChannels; c++)
-		{
-			const cb = audioBuffer.getChannelData(c);
-			for(let i = 0; i < cp.length; i++)
-				buffer[i] += cb[i];
-		}
-	}
-
-  // buffer = filterLowpass(buffer);
-
-  const positions = keepNthPositions(cleanUpPositions(zeroCrossings(filterLowpass(buffer, 5)), 100), 10);
-  
-  let diffs = [];
-  for (let i = 0; i < positions.length - 1; i++) {
-    diffs.push(positions[i+1] - positions[i]);
-  }
-
-  // new buffer by skipping every second position
-  let newBuffer = [];
-  /*
-  for (let i = 0; i < positions.length - 1; i++) {
-    addBlock(buffer, positions, i, false, newBuffer);
-    addBlock(buffer, positions, i, false, newBuffer);
-  }
-  */
-  for (let i = positions.length - 2; i >=0; i-=3) {
-    addBlock(buffer, positions, i, false, newBuffer);
-  }
-  for (let j = 0; j < 10; j++) {
-    for (let i = 1; i < 8; i++) {
-      addBlock(buffer, positions, i, false, newBuffer);
-      addBlock(buffer, positions, i, false, newBuffer);
-      addBlock(buffer, positions, i, false, newBuffer);
-    }
-    for (let i = 7; i >=1; i--) {
-      addBlock(buffer, positions, i, false, newBuffer);
-      addBlock(buffer, positions, i, false, newBuffer);
-      addBlock(buffer, positions, i, false, newBuffer);
-    }
-  }
-
-  const blob = new Blob(
-    [toWav(
-        newBuffer,
-        origSampleRate,
-        1)],
-    {type:'audio/wav'});
-  const URLObject = window.webkitURL || window.URL;
-  const url = URLObject.createObjectURL(blob);
-
-  let audio_source = document.querySelector('#audio_source');
-  audio_source.src = url;
-
-  document.querySelector('#audio_download').href=url;
-
-  let audio_control = document.querySelector('#audio_control');
-  audio_control.pause();
-  audio_control.load();
-  audio_control.oncanplaythrough = audio_control.play();
-}
-
-
-function processFile(event)
-{
-	let audioBuffer = null;
-	let reader = new FileReader();
-	let file = event.target.files[0];
-	reader.onload = function(){
-    context.decodeAudioData(reader.result, function(buffer) {
-      processAudio(buffer);
-		}, function(){
-			// error
-		});
-	}
-	reader.readAsArrayBuffer(file);	
-}
-
-
+/** Creates an EngineRampSound and draws the results on a canvas */
 function analyzeAudio(audioBuffer, noCylinders)
 {
   const engineRampSound = new EngineRampSound(audioBuffer, noCylinders);
   
-  const volumes   = engineRampSound.blocks.map((x) => x.volume);
-  const maxVolume = Math.max(...volumes);
-  const minVolume = Math.min(...volumes);
-  const rpms      = engineRampSound.blocks.map((x) => x.rpm);
-  const maxRPM    = Math.max(...rpms);
-  const minRPM    = Math.min(...rpms);
-
   // Set 2d context and dimensions
   const canvasContainer = document.getElementById("graphSection");
   const canvasEl = document.getElementById("graphCanvas");
@@ -1401,14 +1328,41 @@ function analyzeAudio(audioBuffer, noCylinders)
   canvasEl.width = width;
   canvasEl.height = height;
 
+  // attach the engineRampSound object to the canvas
+  canvasEl.engineRampSound = engineRampSound;
+
+  updateGraphCanvas(canvasEl, engineRampSound);
+}
+
+
+/** Re-draws the canvas using the engineRampSound information-
+ *
+ *  @param canvasEl An html canvas element.
+ *  @param engineRampSound An instance of EngineRampSound
+ */
+function updateGraphCanvas(canvasEl, engineRampSound)
+{
+  const canvasCtx = canvasEl.getContext("2d");
+  const width = canvasEl.width;
+  const height = canvasEl.height;
+
   canvasCtx.clearRect(0, 0, width, height);
 
   // Set fill and create axis
   canvasCtx.fillStyle = "white";
   canvasCtx.fillRect(0, 0, width, height);
 
+  const volumes   = engineRampSound.blocks.map((x) => x.volume);
+  const maxVolume = Math.max(...volumes);
+  const minVolume = Math.min(...volumes);
+  const rpms      = engineRampSound.blocks.map((x) => x.rpm);
+  const maxRPM    = Math.max(...rpms);
+  const minRPM    = Math.min(...rpms);
+  const noSamples = engineRampSound.buffer.length;
+
+  // some background, draw the FFTs
   const spacing = 16;
-  engineRampSound.drawRpms(canvasCtx, spacing, height, width);
+  engineRampSound.drawFFT(canvasCtx, spacing, height, width);
 
   const fontSize = 10;
   canvasCtx.lineWidth = 2;
@@ -1431,10 +1385,10 @@ function analyzeAudio(audioBuffer, noCylinders)
     spacing - fontSize, height - spacing + fontSize);
   canvasCtx.fillText("sec",
     width / 2, height - spacing + fontSize);
-  canvasCtx.fillText(audioBuffer.duration.toString(),
+  canvasCtx.fillText(
+    Math.round(noSamples / engineRampSound.sampleRate).toString(),
     width - spacing, height - spacing + fontSize);
 
-  const noSamples = engineRampSound.buffer.length;
 
   // convert an index into an x-position
   const convX = function(i) {
@@ -1538,11 +1492,99 @@ function analyzeFile(file) {
 }
 
 
+/// Updates information on a mouse move event over the graphCanvas
+function canvasMouseEnter(e) {
+  const popupEl = document.getElementById("graphPopup");
+
+  if ("engineRampSound" in e.currentTarget) {
+    Object.assign(popupEl.style, {
+      left: `${e.clientX + window.scrollX}px`,
+      top: `${e.clientY + window.scrollY}px`,
+      display: `block`,
+    });
+  }
+}
+
+
+/// Updates information on a mouse move event over the graphCanvas
+function canvasMouseLeave(e) {
+  const popupEl = document.getElementById("graphPopup");
+  popupEl.style.display = "none";
+
+  // const canvasCtx = this.getContext("2d");
+}
+
+
+/// Updates information on a mouse move event over the graphCanvas
+function canvasMouseMove(e) {
+  const canvasCtx = e.currentTarget.getContext("2d");
+  const width = e.currentTarget.offsetWidth;
+  const height = e.currentTarget.offsetHeight;
+
+  const popupOffset = 10;
+  const spacing = 16; // from updateGraphCanvas
+
+  if ("engineRampSound" in e.currentTarget) {
+    const engineRampSound = e.currentTarget.engineRampSound;
+
+    const popupEl = document.getElementById("graphPopup");
+    Object.assign(popupEl.style, {
+      left: `${e.clientX + window.scrollX + popupOffset}px`,
+      top: `${e.clientY + window.scrollY + popupOffset}px`,
+      display: `block`,
+    });
+
+    // compute the sample position
+    let samplePos = Math.round((e.offsetX - spacing) /
+        (width - spacing * 2) * engineRampSound.buffer.length);
+
+    if (samplePos < 0) {
+      samplePos = 0;
+    }
+    if (samplePos >= engineRampSound.buffer.length) {
+      samplePos = engineRampSound.buffer.length;
+    }
+
+    const block = engineRampSound.blockAt(samplePos);
+    popupEl.textContent = "Frame: " + samplePos.toString() + 
+      " Time: " + Math.round(samplePos / engineRampSound.sampleRate).toString() + "sec" +
+      " RPM: " + Math.round(block.rpm).toString() +
+      " Volume: " + Math.round(block.volume * 100.0).toString();
+  }
+}
+
+/** Event function for a mous click over the graph canvas.
+function canvasMouseClick(e) {
+  const canvasCtx = e.currentTarget.getContext("2d");
+  const width = e.currentTarget.offsetWidth;
+  const height = e.currentTarget.offsetHeight;
+
+  if ("engineRampSound" in e.currentTarget) {
+    const engineRampSound = e.currentTarget.engineRampSound;
+
+    // compute the sample position
+    let samplePos = Math.round((e.offsetX - spacing) /
+        (width - spacing * 2) * engineRampSound.buffer.length);
+
+    if (samplePos < 0) {
+      samplePos = 0;
+    }
+    if (samplePos >= engineRampSound.buffer.length) {
+      samplePos = engineRampSound.buffer.length;
+    }
+
+    engineRampSound.updateBlockAt(samplePos);
+    updateGraphCanvas(e.currentTarget, engineRampSound);
+  }
+}
+
+
+/// Updates and plays an audio using the audioBuffer
 function synthesizeAudio(audioBuffer, noCylinders)
 {
   const engineRampSound = new EngineRampSound(audioBuffer, noCylinders);
-  const newBuffer = engineRampSound.synthesizeAudio(engineRampSound);
-  // const newBuffer = engineRampSound.synthesizeSynthetic();
+  // const newBuffer = engineRampSound.synthesizeAudio(engineRampSound);
+  const newBuffer = engineRampSound.synthesizeSynthetic();
 
   const blob = new Blob(
     [toWav(
@@ -1563,6 +1605,10 @@ function synthesizeAudio(audioBuffer, noCylinders)
 }
 
 
+/** Called when the "synthesize" button is pressed
+ *
+ *  Calls reads and decodes the audio data, calls synthesizeAudio()
+ */
 function synthesizeFile(file) {
 
   const noCylinders = document.getElementById("inputCylinders2").valueAsNumber;
@@ -1598,24 +1644,21 @@ function synthesizeFile(file) {
     width: fit-content;
 	  background-color: #eee;
   }
+
+  #graphPopup {
+    position: absolute;
+    width: 8em;
+    background-color: #eee;
+    font-size: 75%;
+    display: none;
+  }
 </style>
 
 </head>
 
 <body>
-  <fieldset>
-    <legend>Audio test</legend>
-    <label for="input_file">Input file:</label>
-    <input id="input_file" type="file" accept="*.wav" onchange="processFile(event)"/>
-    <br />
-    <audio id="audio_control" controls>
-      <source id="audio_source" src="" type="audio/wav"/>
-      <a id="audio_download" href="">Download audio</a>
-    </audio>
-  </fieldset>
-  <br />
-
-  <fieldset>
+  <fieldset
+    style="width: 80%; margin:0 auto;">
     <legend>Analyze engine sound</legend>
     Analyzes the given engine sound and outputs the rpm and relative volume. <br />
     <label for="input_file2">Input file:</label>
@@ -1626,25 +1669,30 @@ function synthesizeFile(file) {
     <label for="inputCylinders2">Cylinders</label>
     <input id="inputCylinders2" type="number" min="1" max="12" value="10"/>
     <br />
+
     <input type="button" id="inputAnalyze"
         onclick="analyzeFile(document.getElementById('input_file2').files[0])"
         disabled
         value="Analyze"/>
     <br />
+
     <section
       id="graphSection"
-      style="width: 30em; height: 300px;">
-      <canvas id="graphCanvas" />
+      style="width: 80%; height: 300px;">
+      <canvas id="graphCanvas"
+          onmouseenter="canvasMouseEnter(event)"
+          onmouseleave="canvasMouseLeave(event)"
+          onmousemove="canvasMouseMove(event)"
+          onmouseclick="canvasMouseClick(event)"/>
     </section>
-
-    <label for="inputCylinders3">Cylinders</label>
-    <input id="inputCylinders3" type="number" min="1" max="12" value="10"/>
     <br />
+
     <input type="button" id="inputSynthesize"
         onclick="synthesizeFile(document.getElementById('input_file2').files[0])"
         disabled
         value="Synthesize"/>
     <br />
+
     <audio id="audio_control2" controls>
       <source id="audio_source2" src="" type="audio/wav"/>
     </audio>
@@ -1653,6 +1701,8 @@ function synthesizeFile(file) {
   <small>
     Ralf Engels for <a href="https://github.com/TheDIYGuy999/Rc_Engine_Sound_ESP32">ESP32 RC Engine Sound & Light Controller</a>
   </small>
+
+  <div id="graphPopup">Popup fixed</div>
 
 </body>
 </html>
