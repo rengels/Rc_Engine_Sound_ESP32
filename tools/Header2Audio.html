@@ -11,30 +11,33 @@ function headerToArray(headerText) {
 
   const headerLines = headerText.split("\n");
 
-  // -- find the sample rate:
-  const srRe = /samplerate\s*=\s*(\d+)\s*;/i;
-  let sampleRate = 22050;
-  for (let i = 0; i < headerLines.length; i++) {
-    let results = srRe.exec(headerLines[i]);
-    if (results !== null) {
-      sampleRate = parseInt(sampleRate)
-      break;
-    }
-  }
+  
+  const samplerateRegex = new RegExp("samplerate\s*=\s*(\d+)\s*", "i");
+  const numbersRegex = new RegExp("(?:(\d+),*)+", "g");
+  var sampleRate = 22050;
+  var foundSamplerate = false;
+  var buffer;
 
-  // -- find the samples (we assume it_s a line with commas
-  let buffer = [];
-  for (let i = 0; i < headerLines.length; i++) {
-    let numbers = headerLines[i].split(",");
-    if (numbers.length > 1) {
-      // ignore everything after the last comma
-      // might be a comment or a closing }
-      for (let j = 0; j < numbers.length - 1; j++) {
-          buffer.push(parseInt(numbers[j]) / 128.0);
+  headerLines.forEach(headerLine => {
+    // -- find the sample rate:
+    var matches;
+    if ((matches = headerLine.match(numbersRegex)) !== null){
+      buffer.push(
+        ...matches.map((number) => {
+          return parseInt(number) / 128.0;
+        })
+      );
+    }
+    if (!foundSamplerate){
+      // -- find the samples (we assume they're comma separated numbers)
+      const results = samplerateRegex.exec(headerLine);
+      if (results !== null){
+        sampleRate = parseInt(results[0]);
+        foundSamplerate = true;
       }
     }
-  }
-
+  });
+  
   return [sampleRate, buffer];
 }
 
